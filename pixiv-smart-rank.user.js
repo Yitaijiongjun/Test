@@ -465,7 +465,10 @@
 
             // v2.0 只保存单一 delay；首次升级时继承它，但不再受旧的 250ms 下限约束。
             const legacy = parseInt(localStorage.getItem(DELAY_STORAGE_KEY) || '', 10);
-            if (!Number.isFinite(Number(saved.baseDelay)) && Number.isFinite(legacy)) saved.baseDelay = legacy;
+            if (!Number.isFinite(Number(saved.baseDelay)) && Number.isFinite(legacy)) {
+                // 首次从 v2.0 升级时直接采用更快的新默认值，不让旧的保守延迟继续拖慢新版。
+                saved.baseDelay = Math.min(legacy, DEFAULT_FETCH_SETTINGS.baseDelay);
+            }
             return this.normalizeSettings({ ...DEFAULT_FETCH_SETTINGS, ...saved });
         }
 
@@ -1302,7 +1305,7 @@
                     </summary>
                     <div style="padding:0 8px 8px;">
                         <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 8px;margin-bottom:7px;">
-                            <label style="font-size:10px;color:#6b7280;">当前延迟(ms)<input id="pixiv-delay-base" type="number" min="30" max="10000" step="10" style="width:100%;box-sizing:border-box;margin-top:2px;padding:4px 5px;border:1px solid #d1d5db;border-radius:4px;background:#fff;"></label>
+                            <label style="font-size:10px;color:#6b7280;">基础延迟(ms)<input id="pixiv-delay-base" type="number" min="30" max="10000" step="10" style="width:100%;box-sizing:border-box;margin-top:2px;padding:4px 5px;border:1px solid #d1d5db;border-radius:4px;background:#fff;"></label>
                             <label style="font-size:10px;color:#6b7280;">最低延迟(ms)<input id="pixiv-delay-min" type="number" min="30" max="10000" step="10" style="width:100%;box-sizing:border-box;margin-top:2px;padding:4px 5px;border:1px solid #d1d5db;border-radius:4px;background:#fff;"></label>
                             <label style="font-size:10px;color:#6b7280;">最高延迟(ms)<input id="pixiv-delay-max" type="number" min="30" max="10000" step="50" style="width:100%;box-sizing:border-box;margin-top:2px;padding:4px 5px;border:1px solid #d1d5db;border-radius:4px;background:#fff;"></label>
                             <label style="font-size:10px;color:#6b7280;">成功 N 次加速<input id="pixiv-success-threshold" type="number" min="1" max="50" step="1" style="width:100%;box-sizing:border-box;margin-top:2px;padding:4px 5px;border:1px solid #d1d5db;border-radius:4px;background:#fff;"></label>
