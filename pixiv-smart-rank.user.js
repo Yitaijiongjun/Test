@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv 智能跨页排行助手 (全能进阶版)
 // @namespace    https://github.com/
-// @version      3.0.1
+// @version      3.0.2
 // @description  作品中心本地数据库：宽泛采集作品 ID，保存完整元数据与 Pixiv 中文标签翻译，本地自由筛选、组合标签与跨页排序。
 // @author       Antigravity
 // @match        https://www.pixiv.net/*
@@ -581,15 +581,18 @@
     function pickTranslatedTagName(tag) {
         const translation = tag && typeof tag.translation === 'object' && tag.translation ? tag.translation : {};
         const candidates = [
-            translation.zh,
             translation['zh-cn'],
             translation.zh_cn,
             translation['zh-Hans'],
-            translation.en
+            translation.zh,
+            translation['zh-tw'],
+            translation.zh_tw,
+            translation['zh-TW'],
+            translation['zh-Hant'],
+            translation.en,
+            tag?.tag
         ];
-        const first = candidates.find(value => typeof value === 'string' && value.trim())
-            || Object.values(translation).find(value => typeof value === 'string' && value.trim())
-            || '';
+        const first = candidates.find(value => typeof value === 'string' && value.trim());
         return String(first || '').trim();
     }
 
