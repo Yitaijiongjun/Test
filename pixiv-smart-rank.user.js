@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Pixiv 智能跨页排行助手 (全能进阶版)
 // @namespace    https://github.com/
-// @version      2.1.0
-// @description  精确区间抓取、筛选上下文隔离、IndexedDB 缓存、跨页排序、可调自适应节流、任务控制与数据库大屏。
+// @version      3.0.0
+// @description  作品中心本地数据库：宽泛采集作品 ID，保存完整元数据与 Pixiv 中文标签翻译，本地自由筛选、组合标签与跨页排序。
 // @author       Antigravity
 // @match        https://www.pixiv.net/*
 // @grant        none
@@ -16,11 +16,11 @@
     // 0. 常量与通用工具
     // ==========================================
     const DB_NAME = 'PixivSmartRankDB';
-    const DB_VERSION = 2;
+    const DB_VERSION = 3;
     const ART_STORE = 'artworks';
-    const MEMBERSHIP_STORE = 'searchMemberships';
     const CACHE_TTL = 7 * 86400 * 1000;
-    const DELAY_STORAGE_KEY = 'PixivSmartRank_Delay'; // 兼容 v2.0 旧值
+
+    const DELAY_STORAGE_KEY = 'PixivSmartRank_Delay';
     const FETCH_SETTINGS_STORAGE_KEY = 'PixivSmartRank_FetchSettings';
     const PANEL_POS_STORAGE_KEY = 'PixivSmartRank_PanelPos';
     const HARD_MIN_FETCH_DELAY = 30;
@@ -37,7 +37,7 @@
         backoffMax: 20000
     });
 
-    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
     function clamp(value, min, max) {
         return Math.min(max, Math.max(min, value));
@@ -48,14 +48,15 @@
     }
 
     function formatBytes(bytes) {
-        if (bytes < 1024) return `${bytes} B`;
-        if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
-        return `${(bytes / 1048576).toFixed(2)} MB`;
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / 1048576).toFixed(2) + ' MB';
     }
 
-    function formatDate(ms) {
-        if (!ms) return '-';
-        const d = new Date(ms);
+    function formatDate(msOrDate) {
+        if (!msOrDate) return '-';
+        const d = new Date(msOrDate);
+        if (Number.isNaN(d.getTime())) return '-';
         return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
     }
 
@@ -66,64 +67,24 @@
         return node;
     }
 
+    function normalizeText(value) {
+        return String(value || '').trim().toLocaleLowerCase();
+    }
+
     function isSearchPage() {
         return location.pathname.includes('/tags/') || location.pathname.includes('/search/');
     }
 
-    function getCurrentSearchTag() {
+    // 仅用于给“采集关键词”输入框提供默认值，不参与数据库归属与本地筛选。
+    function getCurrentDiscoveryKeyword() {
         const match = location.pathname.match(/\/tags\/([^/]+)/);
         if (match) return safeDecode(match[1]);
-        const params = new URLSearchParams(location.search);
-        return params.get('word') || '未解析';
+        return new URLSearchParams(location.search).get('word') || '';
     }
 
     function getCurrentPageNumber() {
         const value = parseInt(new URLSearchParams(location.search).get('p') || '1', 10);
         return Number.isFinite(value) && value > 0 ? value : 1;
-    }
-
-    function normalizedSearchPath() {
-        return location.pathname
-            .replace(/^\/[a-z]{2}(?:-[a-z]{2})?(?=\/)/i, '')
-            .replace(/\/$/, '');
-    }
-
-    function buildSearchContext() {
-        const keyword = getCurrentSearchTag();
-        const params = new URLSearchParams(location.search);
-        params.delete('p');
-
-        if (!params.has('word')) params.set('word', keyword);
-        if (!params.has('order')) params.set('order', 'date_d');
-        if (!params.has('mode')) params.set('mode', 'all');
-        if (!params.has('s_mode')) params.set('s_mode', 's_tag');
-
-        const sortedEntries = [...params.entries()].sort((a, b) => {
-            const keyCompare = a[0].localeCompare(b[0]);
-            return keyCompare !== 0 ? keyCompare : a[1].localeCompare(b[1]);
-        });
-        const canonical = new URLSearchParams();
-        for (const [key, value] of sortedEntries) canonical.append(key, value);
-
-        const path = normalizedSearchPath();
-        const key = `${path}?${canonical.toString()}`;
-        const extra = sortedEntries
-            .filter(([k, v]) => !(
-                (k === 'word' && v === keyword) ||
-                (k === 'order' && v === 'date_d') ||
-                (k === 'mode' && v === 'all') ||
-                (k === 's_mode' && v === 's_tag')
-            ))
-            .map(([k, v]) => `${k}=${v}`)
-            .join(' · ');
-
-        return {
-            key,
-            keyword,
-            query: canonical.toString(),
-            label: extra ? `${keyword} · ${extra}` : keyword,
-            path
-        };
     }
 
     // ==========================================
@@ -182,7 +143,7 @@
     }
 
     // ==========================================
-    // 2. IndexedDB：作品与检索上下文分离
+    // 2. IndexedDB：V3 作品中心数据库
     // ==========================================
     class ArtworkDB {
         constructor() {
@@ -194,50 +155,26 @@
             return new Promise((resolve, reject) => {
                 const request = indexedDB.open(DB_NAME, DB_VERSION);
 
-                request.onupgradeneeded = (event) => {
+                request.onupgradeneeded = event => {
                     const database = event.target.result;
-                    const tx = event.target.transaction;
 
-                    let artworkStore;
-                    if (!database.objectStoreNames.contains(ART_STORE)) {
-                        artworkStore = database.createObjectStore(ART_STORE, { keyPath: 'id' });
-                        artworkStore.createIndex('bookmarkCount', 'bookmarkCount', { unique: false });
-                        artworkStore.createIndex('likeCount', 'likeCount', { unique: false });
-                        artworkStore.createIndex('viewCount', 'viewCount', { unique: false });
-                    } else {
-                        artworkStore = tx.objectStore(ART_STORE);
+                    // V3 不兼容旧模型：直接重建，保持结构干净。
+                    for (const storeName of Array.from(database.objectStoreNames)) {
+                        database.deleteObjectStore(storeName);
                     }
 
-                    if (!database.objectStoreNames.contains(MEMBERSHIP_STORE)) {
-                        const memberships = database.createObjectStore(MEMBERSHIP_STORE, { keyPath: 'key' });
-                        memberships.createIndex('contextKey', 'contextKey', { unique: false });
-                        memberships.createIndex('artworkId', 'artworkId', { unique: false });
-                        memberships.createIndex('tag', 'tag', { unique: false });
-
-                        // v1 数据无法还原当时的完整筛选条件，因此只迁移到“旧版上下文”，避免错误混入新精确上下文。
-                        if (event.oldVersion < 2 && artworkStore) {
-                            const cursorReq = artworkStore.openCursor();
-                            cursorReq.onsuccess = (e) => {
-                                const cursor = e.target.result;
-                                if (!cursor) return;
-                                const art = cursor.value;
-                                const tag = art.tag || '未分类';
-                                memberships.put({
-                                    key: `legacy:${tag}::${art.id}`,
-                                    contextKey: `legacy:${tag}`,
-                                    contextLabel: `${tag} · 旧版数据`,
-                                    artworkId: String(art.id),
-                                    tag,
-                                    lastSeen: art.updateTime || Date.now(),
-                                    legacy: true
-                                });
-                                cursor.continue();
-                            };
-                        }
-                    }
+                    const store = database.createObjectStore(ART_STORE, { keyPath: 'id' });
+                    store.createIndex('bookmarkCount', 'bookmarkCount', { unique: false });
+                    store.createIndex('likeCount', 'likeCount', { unique: false });
+                    store.createIndex('viewCount', 'viewCount', { unique: false });
+                    store.createIndex('userId', 'userId', { unique: false });
+                    store.createIndex('isR18', 'isR18', { unique: false });
+                    store.createIndex('isAi', 'isAi', { unique: false });
+                    store.createIndex('tagNames', 'tagNames', { unique: false, multiEntry: true });
+                    store.createIndex('createDate', 'createDate', { unique: false });
                 };
 
-                request.onsuccess = (event) => {
+                request.onsuccess = event => {
                     this.db = event.target.result;
                     this.db.onversionchange = () => {
                         this.db.close();
@@ -245,7 +182,7 @@
                     };
                     resolve(this.db);
                 };
-                request.onerror = (event) => reject(event.target.error);
+                request.onerror = event => reject(event.target.error);
             });
         }
 
@@ -255,26 +192,7 @@
                 const tx = this.db.transaction([ART_STORE], 'readwrite');
                 tx.objectStore(ART_STORE).put(art);
                 tx.oncomplete = () => resolve();
-                tx.onerror = (event) => reject(event.target.error);
-            });
-        }
-
-        async putMembership(artworkId, context) {
-            await this.init();
-            const membership = {
-                key: `${context.key}::${artworkId}`,
-                contextKey: context.key,
-                contextLabel: context.label,
-                artworkId: String(artworkId),
-                tag: context.keyword,
-                lastSeen: Date.now(),
-                legacy: false
-            };
-            return new Promise((resolve, reject) => {
-                const tx = this.db.transaction([MEMBERSHIP_STORE], 'readwrite');
-                tx.objectStore(MEMBERSHIP_STORE).put(membership);
-                tx.oncomplete = () => resolve();
-                tx.onerror = (event) => reject(event.target.error);
+                tx.onerror = event => reject(event.target.error);
             });
         }
 
@@ -296,37 +214,14 @@
             });
         }
 
-        async getRawMemberships() {
+        async getAllByTag(tagName) {
             await this.init();
             return new Promise(resolve => {
-                const req = this.db.transaction([MEMBERSHIP_STORE], 'readonly').objectStore(MEMBERSHIP_STORE).getAll();
+                const tx = this.db.transaction([ART_STORE], 'readonly');
+                const req = tx.objectStore(ART_STORE).index('tagNames').getAll(String(tagName));
                 req.onsuccess = () => resolve(req.result || []);
                 req.onerror = () => resolve([]);
             });
-        }
-
-        async getMembershipsForContext(contextKey) {
-            await this.init();
-            return new Promise(resolve => {
-                const tx = this.db.transaction([MEMBERSHIP_STORE], 'readonly');
-                const index = tx.objectStore(MEMBERSHIP_STORE).index('contextKey');
-                const req = index.getAll(IDBKeyRange.only(contextKey));
-                req.onsuccess = () => resolve(req.result || []);
-                req.onerror = () => resolve([]);
-            });
-        }
-
-        async getAllForContext(contextKey) {
-            const memberships = await this.getMembershipsForContext(contextKey);
-            if (!memberships.length) return [];
-            const wanted = new Set(memberships.map(item => String(item.artworkId)));
-            const all = await this.getRawAll();
-            return all.filter(art => wanted.has(String(art.id)));
-        }
-
-        async hasLegacyForTag(tag) {
-            const memberships = await this.getMembershipsForContext(`legacy:${tag}`);
-            return memberships.length > 0;
         }
 
         async countAll() {
@@ -338,52 +233,63 @@
             });
         }
 
-        async deleteContext(contextKey) {
-            await this.init();
-            await new Promise(resolve => {
-                const tx = this.db.transaction([MEMBERSHIP_STORE], 'readwrite');
-                const index = tx.objectStore(MEMBERSHIP_STORE).index('contextKey');
-                const req = index.openCursor(IDBKeyRange.only(contextKey));
-                req.onsuccess = (event) => {
-                    const cursor = event.target.result;
-                    if (!cursor) return;
-                    cursor.delete();
-                    cursor.continue();
-                };
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => resolve();
-            });
-            await this.cleanupOrphans();
-        }
-
-        async cleanupOrphans() {
-            const memberships = await this.getRawMemberships();
-            const referenced = new Set(memberships.map(item => String(item.artworkId)));
-            await this.init();
-            return new Promise(resolve => {
-                const tx = this.db.transaction([ART_STORE], 'readwrite');
-                const store = tx.objectStore(ART_STORE);
-                const req = store.openCursor();
-                req.onsuccess = (event) => {
-                    const cursor = event.target.result;
-                    if (!cursor) return;
-                    if (!referenced.has(String(cursor.value.id))) cursor.delete();
-                    cursor.continue();
-                };
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => resolve();
-            });
-        }
-
         async clearAll() {
             await this.init();
-            return new Promise(resolve => {
-                const tx = this.db.transaction([ART_STORE, MEMBERSHIP_STORE], 'readwrite');
+            return new Promise((resolve, reject) => {
+                const tx = this.db.transaction([ART_STORE], 'readwrite');
                 tx.objectStore(ART_STORE).clear();
-                tx.objectStore(MEMBERSHIP_STORE).clear();
                 tx.oncomplete = () => resolve();
-                tx.onerror = () => resolve();
+                tx.onerror = event => reject(event.target.error);
             });
+        }
+
+        async getTagCatalog() {
+            const all = await this.getRawAll();
+            const catalog = new Map();
+
+            for (const art of all) {
+                const seen = new Set();
+                for (const tag of Array.isArray(art.tags) ? art.tags : []) {
+                    const name = String(tag?.name || '').trim();
+                    if (!name || seen.has(name)) continue;
+                    seen.add(name);
+
+                    const translatedName = String(tag?.translatedName || '').trim();
+                    const current = catalog.get(name);
+                    if (current) {
+                        current.count += 1;
+                        if (!current.translatedName && translatedName) current.translatedName = translatedName;
+                    } else {
+                        catalog.set(name, { name, translatedName, count: 1 });
+                    }
+                }
+            }
+
+            return [...catalog.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+        }
+
+        async queryArtworks({ tags = [], ai = 'all', r18 = 'all', minFav = 0 } = {}) {
+            let list = tags.length ? await this.getAllByTag(tags[0]) : await this.getRawAll();
+
+            if (tags.length > 1) {
+                const rest = tags.slice(1);
+                list = list.filter(art => {
+                    const names = new Set(Array.isArray(art.tagNames) ? art.tagNames : []);
+                    return rest.every(tag => names.has(tag));
+                });
+            }
+
+            if (ai === 'exclude') list = list.filter(art => !art.isAi);
+            else if (ai === 'only') list = list.filter(art => Boolean(art.isAi));
+
+            if (r18 === 'exclude') list = list.filter(art => !art.isR18);
+            else if (r18 === 'only') list = list.filter(art => Boolean(art.isR18));
+
+            if (minFav > 0) {
+                list = list.filter(art => Number(art.bookmarkCount || 0) >= minFav);
+            }
+
+            return list;
         }
     }
 
@@ -672,6 +578,79 @@
     // ==========================================
     // 5. 详情队列与任务控制
     // ==========================================
+    function pickTranslatedTagName(tag) {
+        const translation = tag && typeof tag.translation === 'object' && tag.translation ? tag.translation : {};
+        const candidates = [
+            translation.zh,
+            translation['zh-cn'],
+            translation.zh_cn,
+            translation['zh-Hans'],
+            translation.en
+        ];
+        const first = candidates.find(value => typeof value === 'string' && value.trim())
+            || Object.values(translation).find(value => typeof value === 'string' && value.trim())
+            || '';
+        return String(first || '').trim();
+    }
+
+    function parseArtworkBody(body, id) {
+        const rawTags = Array.isArray(body?.tags?.tags) ? body.tags.tags : [];
+        const seen = new Set();
+        const tags = [];
+
+        for (const raw of rawTags) {
+            const name = String(raw?.tag || '').trim();
+            if (!name || seen.has(name)) continue;
+            seen.add(name);
+
+            const translation = raw && typeof raw.translation === 'object' && raw.translation
+                ? { ...raw.translation }
+                : {};
+            const translatedName = pickTranslatedTagName(raw);
+
+            tags.push({
+                name,
+                translatedName: translatedName && translatedName !== name ? translatedName : '',
+                translation
+            });
+        }
+
+        const urls = body?.urls && typeof body.urls === 'object' ? body.urls : {};
+        return {
+            id: String(id),
+            title: String(body?.illustTitle || body?.title || 'Untitled'),
+            userId: String(body?.userId || ''),
+            userName: String(body?.userName || ''),
+            bookmarkCount: Number(body?.bookmarkCount || 0),
+            likeCount: Number(body?.likeCount || 0),
+            viewCount: Number(body?.viewCount || 0),
+
+            xRestrict: Number(body?.xRestrict || 0),
+            isR18: Number(body?.xRestrict || 0) > 0,
+            aiType: Number(body?.aiType || 0),
+            isAi: Number(body?.aiType || 0) === 2,
+
+            width: Number(body?.width || 0),
+            height: Number(body?.height || 0),
+            pageCount: Number(body?.pageCount || 1),
+            illustType: Number(body?.illustType || 0),
+            createDate: body?.createDate || '',
+            uploadDate: body?.uploadDate || '',
+            description: String(body?.description || ''),
+
+            thumbUrl: String(urls.small || urls.regular || urls.thumb || ''),
+            regularUrl: String(urls.regular || urls.small || ''),
+            originalUrl: String(urls.original || ''),
+
+            tags,
+            tagNames: tags.map(tag => tag.name),
+            translatedTagNames: tags.map(tag => tag.translatedName).filter(Boolean),
+
+            fetchedAt: Date.now(),
+            updateTime: Date.now()
+        };
+    }
+
     class FetchQueue {
         constructor() {
             this.queue = [];
@@ -681,18 +660,18 @@
             this.totalInCurrentJob = 0;
             this.processedInCurrentJob = 0;
             this.failedInCurrentJob = 0;
-            this.seenKeys = new Set();
+            this.seenIds = new Set();
         }
 
         prepareForNewWork() {
             if (!this.running && this.queue.length === 0) {
-                const shouldReset = this.stopRequested || this.totalInCurrentJob === 0 || this.processedInCurrentJob >= this.totalInCurrentJob;
+                const finished = this.totalInCurrentJob === 0 || this.processedInCurrentJob >= this.totalInCurrentJob;
                 this.stopRequested = false;
-                if (shouldReset) {
+                if (finished) {
                     this.totalInCurrentJob = 0;
                     this.processedInCurrentJob = 0;
                     this.failedInCurrentJob = 0;
-                    this.seenKeys.clear();
+                    this.seenIds.clear();
                 }
             }
             this.updateProgressUI();
@@ -721,22 +700,25 @@
             this.updateProgressUI('已停止');
         }
 
-        enqueue(ids, context) {
+        enqueue(ids) {
             if (!ids.length) return;
             this.stopRequested = false;
             let added = 0;
-            for (const id of ids) {
-                const key = `${context.key}::${id}`;
-                if (this.seenKeys.has(key)) continue;
-                this.seenKeys.add(key);
-                this.queue.push({ id: String(id), context });
+
+            for (const rawId of ids) {
+                const id = String(rawId);
+                if (!/^\d+$/.test(id) || this.seenIds.has(id)) continue;
+                this.seenIds.add(id);
+                this.queue.push(id);
                 added += 1;
             }
+
             if (added > 0) {
                 this.totalInCurrentJob += added;
-                logMessage(`入队 ${added} 个详情任务，待处理 ${this.queue.length}`, 'info');
+                logMessage(`入队 ${added} 个作品详情，待处理 ${this.queue.length}`, 'info');
                 this.updateProgressUI();
             }
+
             if (!this.running && this.queue.length > 0) this.process();
         }
 
@@ -764,80 +746,53 @@
             if (this.running) return;
             this.running = true;
             this.updateProgressUI();
-            logMessage(`详情队列启动，当前基础 Fetch 延迟 ${fetcher.baseDelay}ms`, 'info');
+            logMessage(`详情队列启动，基础 Fetch 延迟 ${fetcher.baseDelay}ms`, 'info');
 
             while (this.queue.length > 0 && !this.stopRequested) {
                 await this.waitIfPaused();
                 if (this.stopRequested) break;
 
-                const item = this.queue.shift();
-                let counted = false;
+                const id = this.queue.shift();
+                let failed = false;
+
                 try {
-                    await db.putMembership(item.id, item.context);
-                    const existing = await db.getArtwork(item.id);
-                    const fresh = existing && (Date.now() - (existing.updateTime || 0) < CACHE_TTL);
+                    const existing = await db.getArtwork(id);
+                    const fresh = existing && Date.now() - Number(existing.fetchedAt || existing.updateTime || 0) < CACHE_TTL;
 
                     if (!fresh) {
-                        logMessage(`API 获取详情: ${item.id}`);
-                        const result = await fetcher.requestJSON(`/ajax/illust/${item.id}`, {
-                            label: `作品 ${item.id}`,
-                            maxRetries: 5,
+                        const result = await fetcher.requestJSON(`/ajax/illust/${id}?lang=zh`, {
+                            label: `作品详情 ${id}`,
+                            maxRetries: 4,
                             cancelCheck: () => this.stopRequested
                         });
 
-                        if (result.cancelled) {
-                            if (!this.stopRequested) this.queue.unshift(item);
-                            break;
-                        }
-
-                        if (!result.ok) {
-                            this.failedInCurrentJob += 1;
-                            counted = true;
-                            const detail = result.status ? `HTTP ${result.status}` : result.errorType;
-                            logMessage(`详情获取失败 ${item.id}: ${detail}，已跳过`, 'error');
+                        if (result.cancelled) break;
+                        if (!result.ok || result.json?.error || !result.json?.body) {
+                            failed = true;
+                            const detail = result.status ? `HTTP ${result.status}` : (result.errorType || 'API error');
+                            logMessage(`详情失败: ${id} · ${detail}`, 'error');
                         } else {
-                            const json = result.json;
-                            if (json && !json.error && json.body) {
-                                const body = json.body;
-                                await db.putArtwork({
-                                    id: String(item.id),
-                                    title: body.illustTitle || body.title || 'Untitled',
-                                    userName: body.userName || '',
-                                    userId: String(body.userId || ''),
-                                    bookmarkCount: Number(body.bookmarkCount || 0),
-                                    likeCount: Number(body.likeCount || 0),
-                                    viewCount: Number(body.viewCount || 0),
-                                    isR18: body.xRestrict === 1 || body.xRestrict === 2,
-                                    isAi: body.aiType === 2,
-                                    thumbUrl: body.urls ? (body.urls.small || body.urls.regular || body.urls.thumb || '') : '',
-                                    updateTime: Date.now()
-                                });
-                                logMessage(`成功入库: ${item.id}（收藏 ${Number(body.bookmarkCount || 0).toLocaleString()}）`, 'success');
-                            } else {
-                                this.failedInCurrentJob += 1;
-                                logMessage(`详情响应结构异常: ${item.id}`, 'error');
-                            }
-                            counted = true;
+                            const art = parseArtworkBody(result.json.body, id);
+                            await db.putArtwork(art);
+                            const translatedCount = art.tags.filter(tag => tag.translatedName).length;
+                            logMessage(`入库: ${id} · 收藏 ${art.bookmarkCount} · Tag ${art.tags.length}（译 ${translatedCount}）`, 'success');
                         }
-                    } else {
-                        counted = true;
                     }
                 } catch (error) {
-                    this.failedInCurrentJob += 1;
-                    counted = true;
-                    logMessage(`本地处理异常: ${item.id} · ${error?.message || 'unknown'}`, 'error');
+                    failed = true;
+                    logMessage(`本地处理异常: ${id} · ${error?.message || 'unknown'}`, 'error');
                 }
 
-                if (counted) {
-                    this.processedInCurrentJob += 1;
-                    this.updateProgressUI();
-                }
+                this.processedInCurrentJob += 1;
+                if (failed) this.failedInCurrentJob += 1;
+                this.updateProgressUI();
             }
 
             this.running = false;
             const stopped = this.stopRequested;
             this.updateProgressUI(stopped ? '已停止' : '已完成');
-            updateDBStats();
+            await updateDBStats();
+            refreshTagDatalist();
             if (!stopped) logMessage('当前详情队列处理完毕。', 'success');
 
             setTimeout(() => {
@@ -845,7 +800,7 @@
                     this.totalInCurrentJob = 0;
                     this.processedInCurrentJob = 0;
                     this.failedInCurrentJob = 0;
-                    this.seenKeys.clear();
+                    this.seenIds.clear();
                     this.stopRequested = false;
                     this.updateProgressUI();
                 }
@@ -865,6 +820,7 @@
         if (!row) return;
         const container = document.getElementById('pixiv-progress-container');
         if (scanActive && container) container.style.display = 'block';
+
         if (scanTotal <= 0) {
             row.textContent = '搜索页扫描: -';
             return;
@@ -873,12 +829,18 @@
     }
 
     // ==========================================
-    // 6. 搜索页抓取
+    // 6. 搜索页抓取：只负责发现作品 ID
     // ==========================================
-    async function fetchSearchPage(context, page) {
-        const params = new URLSearchParams(context.query);
-        params.set('p', String(page));
-        const url = `/ajax/search/artworks/${encodeURIComponent(context.keyword)}?${params.toString()}`;
+    async function fetchSearchPage(keyword, page) {
+        const params = new URLSearchParams({
+            word: keyword,
+            order: 'date_d',
+            mode: 'all',
+            p: String(page),
+            s_mode: 's_tag',
+            lang: 'zh'
+        });
+        const url = `/ajax/search/artworks/${encodeURIComponent(keyword)}?${params.toString()}`;
 
         const result = await fetcher.requestJSON(url, {
             label: `搜索页 ${page}`,
@@ -887,9 +849,12 @@
         });
 
         if (!result.ok) return result;
-        const data = result.json;
-        const list = data?.body?.illustManga?.data || [];
-        const ids = [...new Set(list.map(item => String(item.id)).filter(id => /^\d+$/.test(id)))];
+
+        const list = result.json?.body?.illustManga?.data || [];
+        const ids = [...new Set(
+            list.map(item => String(item?.id || '')).filter(id => /^\d+$/.test(id))
+        )];
+
         return { ok: true, status: result.status, ids };
     }
 
