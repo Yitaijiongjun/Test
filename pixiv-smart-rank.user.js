@@ -1524,15 +1524,16 @@
     function handleRouteChange() {
         nativeArtworkContainer = null;
         const panel = document.getElementById('pixiv-rank-panel');
+
         if (isSearchPage()) {
             init();
             if (panel) panel.style.display = 'block';
 
-            const tagEl = document.getElementById('pixiv-current-tag');
-            if (tagEl) {
-                tagEl.textContent = getCurrentSearchTag();
-                tagEl.title = buildSearchContext().label;
+            const keywordInput = document.getElementById('pixiv-discovery-keyword');
+            if (keywordInput && document.activeElement !== keywordInput) {
+                keywordInput.value = getCurrentDiscoveryKeyword();
             }
+
             const startEl = document.getElementById('pixiv-page-start');
             const countEl = document.getElementById('pixiv-page-count');
             if (startEl && countEl) {
@@ -1545,6 +1546,7 @@
 
         const wrapper = document.getElementById('pixiv-rank-wrapper');
         if (wrapper) wrapper.style.display = 'none';
+
         setTimeout(() => {
             const container = findArtworkContainer();
             if (container) container.style.display = '';
