@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv 智能跨页排行助手 (全能进阶版)
 // @namespace    https://github.com/
-// @version      3.0.2
+// @version      3.0.3
 // @description  作品中心本地数据库：宽泛采集作品 ID，保存完整元数据与 Pixiv 中文标签翻译，本地自由筛选、组合标签与跨页排序。
 // @author       Antigravity
 // @match        https://www.pixiv.net/*
@@ -1356,7 +1356,7 @@
                     </div>
                 </details>
 
-                <details style="margin-bottom:10px;">
+                <details open style="margin-bottom:10px;">
                     <summary style="cursor:pointer;font-size:11px;color:#6b7280;padding:2px 0;">日志</summary>
                     <div id="pixiv-rank-log-box" style="height:96px;overflow-y:auto;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:8px;margin-top:5px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;"></div>
                 </details>
