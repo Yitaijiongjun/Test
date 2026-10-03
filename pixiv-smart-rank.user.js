@@ -911,188 +911,247 @@
     }
 
     // ==========================================
-    // 8. 数据库 Dashboard
+    // 8. 数据库 Dashboard：Tag 浏览器
     // ==========================================
     async function renderDBDashboard() {
         document.getElementById('pixiv-db-overlay')?.remove();
 
-        const [allData, memberships] = await Promise.all([db.getRawAll(), db.getRawMemberships()]);
-        const artMap = new Map(allData.map(art => [String(art.id), art]));
-        const stats = new Map();
-        let totalBytes = 0;
-
-        for (const art of allData) totalBytes += JSON.stringify(art).length * 2;
-        for (const membership of memberships) totalBytes += JSON.stringify(membership).length * 2;
-
-        for (const membership of memberships) {
-            const key = membership.contextKey;
-            if (!stats.has(key)) {
-                stats.set(key, {
-                    key,
-                    label: membership.contextLabel || membership.tag || key,
-                    count: 0,
-                    latestUpdate: 0,
-                    sizeBytes: 0,
-                    legacy: Boolean(membership.legacy)
-                });
-            }
-            const stat = stats.get(key);
-            stat.count += 1;
-            stat.latestUpdate = Math.max(stat.latestUpdate, membership.lastSeen || 0);
-            stat.sizeBytes += JSON.stringify(membership).length * 2;
-            const art = artMap.get(String(membership.artworkId));
-            if (art) stat.sizeBytes += JSON.stringify(art).length * 2;
-        }
-
-        const sorted = [...stats.values()].sort((a, b) => b.count - a.count);
-        const maxCount = sorted.length ? sorted[0].count : 1;
+        const allData = await db.getRawAll();
+        const catalog = await db.getTagCatalog();
+        const totalBytes = allData.reduce((sum, art) => sum + JSON.stringify(art).length * 2, 0);
+        const aiCount = allData.filter(art => art.isAi).length;
+        const r18Count = allData.filter(art => art.isR18).length;
 
         const overlay = createElement('div', 'pixiv-dashboard-overlay');
         overlay.id = 'pixiv-db-overlay';
         const modal = createElement('div', 'pixiv-dashboard-modal');
+        modal.style.width = '820px';
 
         const header = createElement('div', 'pixiv-dashboard-header');
-        const title = createElement('div', '', '本地数据库总览');
+        const titleWrap = createElement('div');
+        const title = createElement('div', '', '本地作品数据库');
         title.style.cssText = 'font-size:16px;font-weight:700;color:#111827;';
+        const subtitle = createElement('div', '', 'Tag 来自作品详情，中文优先显示 Pixiv 官方翻译');
+        subtitle.style.cssText = 'font-size:11px;color:#9ca3af;margin-top:2px;';
+        titleWrap.append(title, subtitle);
         const close = createElement('button', '', '×');
         close.type = 'button';
         close.style.cssText = 'border:0;background:transparent;color:#9ca3af;font-size:22px;cursor:pointer;line-height:1;';
         close.onclick = () => overlay.remove();
-        header.append(title, close);
+        header.append(titleWrap, close);
 
         const body = createElement('div', 'pixiv-dashboard-body pixiv-custom-scrollbar');
         const summary = createElement('div');
-        summary.style.cssText = 'display:flex;gap:20px;margin-bottom:20px;background:#f9fafb;padding:16px;border-radius:8px;border:1px solid #f3f4f6;align-items:center;';
+        summary.style.cssText = 'display:flex;gap:18px;margin-bottom:16px;background:#f9fafb;padding:14px;border-radius:8px;border:1px solid #f3f4f6;align-items:center;';
 
         const makeMetric = (label, value) => {
             const wrap = createElement('div');
             const l = createElement('div', '', label);
-            l.style.cssText = 'font-size:12px;color:#6b7280;';
+            l.style.cssText = 'font-size:11px;color:#6b7280;';
             const v = createElement('div', '', value);
-            v.style.cssText = 'font-size:20px;font-weight:700;color:#111827;';
+            v.style.cssText = 'font-size:19px;font-weight:700;color:#111827;';
             wrap.append(l, v);
             return wrap;
         };
 
         summary.append(
             makeMetric('唯一作品', allData.length.toLocaleString()),
-            makeMetric('检索上下文', sorted.length.toLocaleString()),
-            makeMetric('上下文关联', memberships.length.toLocaleString()),
+            makeMetric('唯一 Tag', catalog.length.toLocaleString()),
+            makeMetric('AI 作品', aiCount.toLocaleString()),
+            makeMetric('R-18', r18Count.toLocaleString()),
             makeMetric('预估存储', formatBytes(totalBytes))
         );
 
-        const clearAll = createElement('button', '', '清空全部数据');
+        const clearAll = createElement('button', '', '清空数据库');
         clearAll.type = 'button';
-        clearAll.style.cssText = 'margin-left:auto;padding:6px 12px;background:#fff;color:#ef4444;border:1px solid #ef4444;border-radius:4px;font-size:12px;cursor:pointer;font-weight:600;';
+        clearAll.style.cssText = 'margin-left:auto;padding:6px 10px;background:#fff;color:#ef4444;border:1px solid #ef4444;border-radius:4px;font-size:11px;cursor:pointer;font-weight:600;';
         clearAll.onclick = async () => {
-            if (!confirm('确定要清空本地收集的全部 Pixiv 排行数据吗？')) return;
+            if (!confirm('确定要清空 V3 本地作品数据库吗？')) return;
             await db.clearAll();
             await updateDBStats();
+            await refreshTagDatalist();
+            renderLocalFilterChips();
             renderDBDashboard();
         };
         summary.appendChild(clearAll);
         body.appendChild(summary);
 
+        const searchRow = createElement('div');
+        searchRow.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:10px;';
+        const search = document.createElement('input');
+        search.type = 'search';
+        search.placeholder = '搜索中文翻译或 Pixiv 原 Tag';
+        search.style.cssText = 'flex:1;padding:7px 9px;border:1px solid #d1d5db;border-radius:5px;font-size:12px;outline:none;';
+        const hint = createElement('span', '', '最多展示 500 项');
+        hint.style.cssText = 'font-size:10px;color:#9ca3af;white-space:nowrap;';
+        searchRow.append(search, hint);
+        body.appendChild(searchRow);
+
         const table = createElement('table', 'pixiv-dashboard-table');
         const thead = document.createElement('thead');
         const headRow = document.createElement('tr');
-        for (const text of ['检索上下文', '关联量', '预估体积', '最后出现', '操作']) {
-            headRow.appendChild(createElement('th', '', text));
-        }
+        for (const text of ['中文 / 显示名', 'Pixiv 原 Tag', '作品数', '操作']) headRow.appendChild(createElement('th', '', text));
         thead.appendChild(headRow);
         table.appendChild(thead);
-
         const tbody = document.createElement('tbody');
-        if (!sorted.length) {
-            const row = document.createElement('tr');
-            const cell = createElement('td', '', '数据库暂无记录');
-            cell.colSpan = 5;
-            cell.style.cssText = 'text-align:center;padding:20px;color:#9ca3af;';
-            row.appendChild(cell);
-            tbody.appendChild(row);
-        } else {
-            for (const stat of sorted) {
-                const row = document.createElement('tr');
-
-                const nameCell = document.createElement('td');
-                const name = createElement('div', '', stat.label);
-                name.style.cssText = 'font-weight:600;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-                name.title = stat.label;
-                nameCell.appendChild(name);
-                if (stat.legacy) {
-                    const legacy = createElement('span', 'pixiv-status-pill', 'v1 旧数据');
-                    legacy.style.marginTop = '4px';
-                    nameCell.appendChild(legacy);
-                }
-
-                const countCell = document.createElement('td');
-                const countWrap = createElement('div');
-                countWrap.style.cssText = 'display:flex;align-items:center;gap:8px;';
-                const countText = createElement('span', '', stat.count.toLocaleString());
-                countText.style.minWidth = '42px';
-                const track = createElement('div', 'pixiv-bar-track');
-                track.style.cssText = 'flex:1;max-width:130px;';
-                const fill = createElement('div', 'pixiv-bar-fill');
-                fill.style.width = `${(stat.count / maxCount) * 100}%`;
-                track.appendChild(fill);
-                countWrap.append(countText, track);
-                countCell.appendChild(countWrap);
-
-                const sizeCell = createElement('td', '', formatBytes(stat.sizeBytes));
-                sizeCell.style.color = '#6b7280';
-                const dateCell = createElement('td', '', formatDate(stat.latestUpdate));
-                dateCell.style.cssText = 'color:#6b7280;font-size:12px;';
-
-                const actionCell = document.createElement('td');
-                const remove = createElement('button', 'pixiv-danger-btn', '清除');
-                remove.type = 'button';
-                remove.onclick = async () => {
-                    if (!confirm(`确定清除检索上下文「${stat.label}」的全部关联数据吗？共享作品会在无其他引用时自动回收。`)) return;
-                    await db.deleteContext(stat.key);
-                    await updateDBStats();
-                    renderDBDashboard();
-                };
-                actionCell.appendChild(remove);
-
-                row.append(nameCell, countCell, sizeCell, dateCell, actionCell);
-                tbody.appendChild(row);
-            }
-        }
         table.appendChild(tbody);
         body.appendChild(table);
 
+        const renderRows = query => {
+            tbody.replaceChildren();
+            const q = normalizeText(query);
+            const filtered = catalog.filter(tag => !q || normalizeText(tag.name).includes(q) || normalizeText(tag.translatedName).includes(q)).slice(0, 500);
+            if (!filtered.length) {
+                const row = document.createElement('tr');
+                const cell = createElement('td', '', catalog.length ? '没有匹配的 Tag' : '数据库暂无作品');
+                cell.colSpan = 4;
+                cell.style.cssText = 'text-align:center;padding:20px;color:#9ca3af;';
+                row.appendChild(cell);
+                tbody.appendChild(row);
+                return;
+            }
+
+            const fragment = document.createDocumentFragment();
+            for (const tag of filtered) {
+                const row = document.createElement('tr');
+                const translatedCell = document.createElement('td');
+                const primary = createElement('div', '', tag.translatedName || tag.name);
+                primary.style.cssText = 'font-weight:600;color:#111827;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+                primary.title = tag.translatedName || tag.name;
+                translatedCell.appendChild(primary);
+
+                const originalCell = createElement('td', '', tag.translatedName && tag.translatedName !== tag.name ? tag.name : '—');
+                originalCell.style.cssText = 'color:#6b7280;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+                originalCell.title = tag.name;
+                const countCell = createElement('td', '', tag.count.toLocaleString());
+
+                const actionCell = document.createElement('td');
+                const filterBtn = createElement('button', 'pixiv-mini-btn', '筛选');
+                filterBtn.type = 'button';
+                filterBtn.onclick = () => {
+                    addLocalTagFilter(tag.name, tag.translatedName);
+                    overlay.remove();
+                    applyCurrentLocalView();
+                };
+                actionCell.appendChild(filterBtn);
+                row.append(translatedCell, originalCell, countCell, actionCell);
+                fragment.appendChild(row);
+            }
+            tbody.appendChild(fragment);
+        };
+
+        search.addEventListener('input', () => renderRows(search.value));
+        renderRows('');
         modal.append(header, body);
         overlay.appendChild(modal);
         document.body.appendChild(overlay);
-        overlay.addEventListener('click', event => {
-            if (event.target === overlay) overlay.remove();
-        });
+        overlay.onclick = event => { if (event.target === overlay) overlay.remove(); };
     }
 
     // ==========================================
-    // 9. 跨页排序渲染（完全使用 DOM API，避免注入用户数据）
+    // 9. 本地筛选与跨页排序
     // ==========================================
+    const localFilterState = { tags: [], ai: 'all', r18: 'all' };
+    let cachedTagCatalog = [];
+
+    function displayTagName(tag) {
+        return String(tag?.translatedName || tag?.name || '');
+    }
+
+    function addLocalTagFilter(name, translatedName = '') {
+        name = String(name || '').trim();
+        if (!name || localFilterState.tags.some(tag => tag.name === name)) return;
+        localFilterState.tags.push({ name, translatedName: String(translatedName || '').trim() });
+        renderLocalFilterChips();
+    }
+
+    function removeLocalTagFilter(name) {
+        localFilterState.tags = localFilterState.tags.filter(tag => tag.name !== name);
+        renderLocalFilterChips();
+    }
+
+    function renderLocalFilterChips() {
+        const box = document.getElementById('pixiv-active-tag-filters');
+        if (!box) return;
+        box.replaceChildren();
+
+        if (!localFilterState.tags.length) {
+            const empty = createElement('span', '', '未选择 Tag：将查询整个本地数据库');
+            empty.style.cssText = 'font-size:10px;color:#9ca3af;';
+            box.appendChild(empty);
+            return;
+        }
+
+        for (const tag of localFilterState.tags) {
+            const chip = createElement('button');
+            chip.type = 'button';
+            chip.title = `${tag.translatedName || tag.name} · ${tag.name} · 点击移除`;
+            chip.style.cssText = 'border:1px solid #bae6fd;background:#f0f9ff;color:#0369a1;border-radius:999px;padding:3px 7px;font-size:10px;cursor:pointer;max-width:145px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+            chip.textContent = `${tag.translatedName || tag.name} ×`;
+            chip.onclick = () => removeLocalTagFilter(tag.name);
+            box.appendChild(chip);
+        }
+    }
+
+    async function refreshTagDatalist() {
+        cachedTagCatalog = await db.getTagCatalog();
+        const datalist = document.getElementById('pixiv-tag-datalist');
+        if (!datalist) return;
+        datalist.replaceChildren();
+        const fragment = document.createDocumentFragment();
+        for (const tag of cachedTagCatalog.slice(0, 1500)) {
+            const option = document.createElement('option');
+            option.value = tag.translatedName || tag.name;
+            option.label = tag.translatedName && tag.translatedName !== tag.name ? `${tag.name} · ${tag.count}` : `${tag.count} 个作品`;
+            fragment.appendChild(option);
+        }
+        datalist.appendChild(fragment);
+    }
+
+    async function addTagFromFilterInput() {
+        const input = document.getElementById('pixiv-local-tag-input');
+        if (!input) return;
+        const value = input.value.trim();
+        if (!value) return;
+        if (!cachedTagCatalog.length) cachedTagCatalog = await db.getTagCatalog();
+
+        const normalized = normalizeText(value);
+        let matched = cachedTagCatalog.find(tag => normalizeText(tag.name) === normalized || normalizeText(tag.translatedName) === normalized);
+        if (!matched) {
+            const partial = cachedTagCatalog.filter(tag => normalizeText(tag.name).includes(normalized) || normalizeText(tag.translatedName).includes(normalized));
+            if (partial.length === 1) matched = partial[0];
+        }
+        if (!matched) {
+            logMessage(`本地数据库中找不到 Tag：${value}`, 'warn');
+            return;
+        }
+
+        addLocalTagFilter(matched.name, matched.translatedName);
+        input.value = '';
+    }
+
     function createArtworkCard(art) {
         const card = createElement('div', 'pixiv-rank-card');
         const link = document.createElement('a');
-        link.href = `/artworks/${encodeURIComponent(String(art.id))}`;
+        link.href = `/artworks/${encodeURIComponent(art.id)}`;
         link.target = '_blank';
         link.rel = 'noopener noreferrer';
         link.style.cssText = 'display:flex;flex-direction:column;text-decoration:none;color:inherit;width:100%;';
 
         const imageBox = createElement('div');
         imageBox.style.cssText = 'position:relative;width:100%;aspect-ratio:1/1;border-radius:6px;overflow:hidden;background:rgba(128,128,128,.1);';
-        const img = document.createElement('img');
-        img.src = art.thumbUrl || '';
-        img.alt = art.title || '';
-        img.loading = 'lazy';
-        img.className = 'pixiv-rank-img';
-        img.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;';
-        imageBox.appendChild(img);
+        const image = document.createElement('img');
+        image.className = 'pixiv-rank-img';
+        image.src = art.thumbUrl || '';
+        image.alt = art.title || '';
+        image.loading = 'lazy';
+        image.referrerPolicy = 'no-referrer';
+        image.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;';
+        imageBox.appendChild(image);
 
-        const bookmark = createElement('div', '', `收藏: ${Number(art.bookmarkCount || 0).toLocaleString()}`);
-        bookmark.style.cssText = 'position:absolute;bottom:4px;right:4px;background:rgba(0,0,0,.62);color:#fff;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:700;backdrop-filter:blur(2px);';
-        imageBox.appendChild(bookmark);
+        const fav = createElement('div', '', `收藏: ${Number(art.bookmarkCount || 0).toLocaleString()}`);
+        fav.style.cssText = 'position:absolute;bottom:4px;right:4px;background:rgba(0,0,0,.62);color:#fff;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:700;backdrop-filter:blur(2px);';
+        imageBox.appendChild(fav);
 
         if (art.isR18) {
             const badge = createElement('div', '', 'R-18');
@@ -1116,11 +1175,20 @@
         const user = createElement('span', '', art.userName || '');
         user.style.cssText = 'font-size:12px;color:rgba(128,128,128,.9);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
         const views = Number(art.viewCount || 0);
-        const viewLabel = views >= 1000 ? `${(views / 1000).toFixed(1)}k 阅` : `${views} 阅`;
-        const view = createElement('span', '', viewLabel);
+        const view = createElement('span', '', views >= 1000 ? `${(views / 1000).toFixed(1)}k 阅` : `${views} 阅`);
         view.style.cssText = 'font-size:11px;color:rgba(128,128,128,.65);white-space:nowrap;';
         sub.append(user, view);
-        meta.append(title, sub);
+
+        const tags = createElement('div');
+        tags.style.cssText = 'display:flex;gap:4px;overflow:hidden;height:18px;';
+        for (const tag of (Array.isArray(art.tags) ? art.tags : []).slice(0, 3)) {
+            const pill = createElement('span', '', displayTagName(tag));
+            pill.title = tag.translatedName && tag.translatedName !== tag.name ? `${tag.translatedName} / ${tag.name}` : tag.name;
+            pill.style.cssText = 'max-width:95px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#f3f4f6;color:#6b7280;border-radius:3px;padding:1px 4px;font-size:9px;';
+            tags.appendChild(pill);
+        }
+
+        meta.append(title, sub, tags);
         link.append(imageBox, meta);
         card.appendChild(link);
         return card;
@@ -1133,22 +1201,26 @@
             return;
         }
 
-        const context = buildSearchContext();
-        let list = await db.getAllForContext(context.key);
+        localFilterState.ai = document.getElementById('pixiv-filter-ai')?.value || 'all';
+        localFilterState.r18 = document.getElementById('pixiv-filter-r18')?.value || 'all';
+
+        let list = await db.queryArtworks({
+            tags: localFilterState.tags.map(tag => tag.name),
+            ai: localFilterState.ai,
+            r18: localFilterState.r18,
+            minFav
+        });
+
         if (!list.length) {
-            if (await db.hasLegacyForTag(context.keyword)) {
-                alert('检测到 v1 旧缓存，但旧数据没有完整筛选上下文。请按当前筛选重新抓取一次后再排序。');
-            } else {
-                alert('当前检索条件暂无精确缓存，请先抓取对应页数。');
-            }
+            alert('本地数据库中没有符合当前条件的作品。');
             return;
         }
 
-        if (minFav > 0) list = list.filter(art => Number(art.bookmarkCount || 0) >= minFav);
         list.sort((a, b) => {
             if (sortType === 'bookmark') return Number(b.bookmarkCount || 0) - Number(a.bookmarkCount || 0);
             if (sortType === 'like') return Number(b.likeCount || 0) - Number(a.likeCount || 0);
             if (sortType === 'view') return Number(b.viewCount || 0) - Number(a.viewCount || 0);
+            if (sortType === 'date') return new Date(b.createDate || 0).getTime() - new Date(a.createDate || 0).getTime();
             if (sortType === 'rate') {
                 const rateA = Number(a.viewCount || 0) > 0 ? Number(a.bookmarkCount || 0) / Number(a.viewCount || 0) : 0;
                 const rateB = Number(b.viewCount || 0) > 0 ? Number(b.bookmarkCount || 0) / Number(b.viewCount || 0) : 0;
@@ -1163,27 +1235,30 @@
             wrapper.id = 'pixiv-rank-wrapper';
             wrapper.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(184px,1fr));gap:24px 20px;width:100%;padding-top:16px;';
         }
-        if (wrapper.parentElement !== container.parentElement || wrapper.nextSibling !== container) {
-            container.parentElement.insertBefore(wrapper, container);
-        }
+        if (wrapper.parentElement !== container.parentElement || wrapper.nextSibling !== container) container.parentElement.insertBefore(wrapper, container);
 
         container.style.display = 'none';
         wrapper.style.display = 'grid';
         wrapper.replaceChildren();
-
         const fragment = document.createDocumentFragment();
         for (const art of list) fragment.appendChild(createArtworkCard(art));
         wrapper.appendChild(fragment);
-        logMessage(`跨页排序完成：${list.length} 个作品 · ${context.label}`, 'success');
+
+        const tagLabel = localFilterState.tags.length ? localFilterState.tags.map(tag => tag.translatedName || tag.name).join(' + ') : '全部作品';
+        logMessage(`本地筛选完成：${list.length} 个作品 · ${tagLabel}`, 'success');
+    }
+
+    function applyCurrentLocalView() {
+        const sort = document.getElementById('pixiv-rank-sort-select')?.value || 'bookmark';
+        const minFav = Math.max(0, parseInt(document.getElementById('pixiv-min-fav')?.value || '0', 10) || 0);
+        renderRankedArtworks(sort, minFav);
     }
 
     // ==========================================
     // 10. 控制面板与拖拽
     // ==========================================
     function enablePanelDrag(panel, handle) {
-        let dragging = false;
-        let offsetX = 0;
-        let offsetY = 0;
+        let dragging = false, offsetX = 0, offsetY = 0;
 
         const restore = () => {
             try {
@@ -1192,10 +1267,8 @@
                 const pos = JSON.parse(raw);
                 if (!Number.isFinite(pos.left) || !Number.isFinite(pos.top)) return;
                 const rect = panel.getBoundingClientRect();
-                const left = clamp(pos.left, 8, Math.max(8, window.innerWidth - rect.width - 8));
-                const top = clamp(pos.top, 8, Math.max(8, window.innerHeight - 48));
-                panel.style.left = `${left}px`;
-                panel.style.top = `${top}px`;
+                panel.style.left = clamp(pos.left, 8, Math.max(8, window.innerWidth - rect.width - 8)) + 'px';
+                panel.style.top = clamp(pos.top, 8, Math.max(8, window.innerHeight - 48)) + 'px';
                 panel.style.right = 'auto';
             } catch (_) {}
         };
@@ -1206,8 +1279,8 @@
             dragging = true;
             offsetX = event.clientX - rect.left;
             offsetY = event.clientY - rect.top;
-            panel.style.left = `${rect.left}px`;
-            panel.style.top = `${rect.top}px`;
+            panel.style.left = rect.left + 'px';
+            panel.style.top = rect.top + 'px';
             panel.style.right = 'auto';
             handle.setPointerCapture(event.pointerId);
             event.preventDefault();
@@ -1216,10 +1289,8 @@
         handle.addEventListener('pointermove', event => {
             if (!dragging) return;
             const rect = panel.getBoundingClientRect();
-            const left = clamp(event.clientX - offsetX, 8, Math.max(8, window.innerWidth - rect.width - 8));
-            const top = clamp(event.clientY - offsetY, 8, Math.max(8, window.innerHeight - 48));
-            panel.style.left = `${left}px`;
-            panel.style.top = `${top}px`;
+            panel.style.left = clamp(event.clientX - offsetX, 8, Math.max(8, window.innerWidth - rect.width - 8)) + 'px';
+            panel.style.top = clamp(event.clientY - offsetY, 8, Math.max(8, window.innerHeight - 48)) + 'px';
         });
 
         const finish = event => {
@@ -1241,22 +1312,17 @@
 
         const panel = createElement('div');
         panel.id = 'pixiv-rank-panel';
-        panel.style.cssText = `
-            position:fixed;top:75px;right:24px;z-index:99999;width:328px;
-            background:#fff;color:#374151;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.08);
-            border:1px solid #e5e7eb;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
-            font-size:13px;padding:16px;user-select:none;
-        `;
+        panel.style.cssText = 'position:fixed;top:75px;right:24px;z-index:99999;width:350px;background:#fff;color:#374151;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.08);border:1px solid #e5e7eb;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:13px;padding:16px;box-sizing:border-box;user-select:none;';
 
         panel.innerHTML = `
-            <div id="pixiv-rank-drag-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;cursor:move;touch-action:none;">
-                <span style="font-weight:600;font-size:14px;color:#111827;">Pixiv 跨页排序引擎</span>
+            <div id="pixiv-rank-drag-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;cursor:move;touch-action:none;">
+                <span style="font-weight:600;font-size:14px;color:#111827;">Pixiv 本地作品引擎 V3</span>
                 <span id="pixiv-rank-toggle-btn" data-no-drag style="cursor:pointer;color:#9ca3af;font-size:12px;">▼ 收起</span>
             </div>
             <div id="pixiv-rank-panel-body">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:12px;color:#4b5563;gap:8px;">
-                    <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">标签: <strong id="pixiv-current-tag" style="color:#111827;"></strong></span>
-                    <span style="white-space:nowrap;">总库: <strong id="pixiv-db-count" style="color:#0096fa;">0</strong> <a id="btn-open-db" style="color:#0096fa;cursor:pointer;margin-left:3px;">DB</a></span>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:7px;font-size:11px;color:#6b7280;">
+                    <span>本地作品: <strong id="pixiv-db-count" style="color:#0096fa;">0</strong></span>
+                    <a id="btn-open-db" style="color:#0096fa;cursor:pointer;">Tag 数据库</a>
                 </div>
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:7px;font-size:11px;color:#6b7280;">
                     <span>当前 Fetch 延迟: <strong id="pixiv-fetch-delay" style="color:#111827;">-</strong></span>
@@ -1265,8 +1331,7 @@
 
                 <details id="pixiv-fetch-tuning" style="margin-bottom:10px;border:1px solid #e5e7eb;border-radius:6px;background:#fafafa;">
                     <summary style="cursor:pointer;padding:7px 8px;font-size:11px;color:#4b5563;display:flex;justify-content:space-between;align-items:center;">
-                        <span>Fetch 节流调节</span>
-                        <span id="pixiv-fetch-profile-summary" style="color:#0096fa;">-</span>
+                        <span>Fetch 节流调节</span><span id="pixiv-fetch-profile-summary" style="color:#0096fa;">-</span>
                     </summary>
                     <div style="padding:0 8px 8px;">
                         <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 8px;margin-bottom:7px;">
@@ -1286,13 +1351,11 @@
                     </div>
                 </details>
 
-                <div id="pixiv-rank-log-box" style="height:108px;overflow-y:auto;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;margin-bottom:12px;"></div>
-
-                <div id="pixiv-progress-container" style="display:none;margin-bottom:14px;padding:9px;border:1px solid #e5e7eb;border-radius:6px;background:#fafafa;">
+                <div id="pixiv-rank-log-box" style="height:96px;overflow-y:auto;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;margin-bottom:12px;"></div>
+                <div id="pixiv-progress-container" style="display:none;margin-bottom:12px;padding:9px;border:1px solid #e5e7eb;border-radius:6px;background:#fafafa;">
                     <div id="pixiv-scan-progress" style="font-size:11px;color:#6b7280;margin-bottom:5px;">搜索页扫描: -</div>
                     <div style="display:flex;justify-content:space-between;font-size:11px;color:#6b7280;margin-bottom:4px;">
-                        <span id="pixiv-progress-text">详情解析: 0 / 0</span>
-                        <span id="pixiv-progress-pct" style="font-weight:600;color:#0096fa;">0%</span>
+                        <span id="pixiv-progress-text">详情解析: 0 / 0</span><span id="pixiv-progress-pct" style="font-weight:600;color:#0096fa;">0%</span>
                     </div>
                     <div class="pixiv-bar-track"><div id="pixiv-progress-fill" class="pixiv-bar-fill" style="width:0%;"></div></div>
                     <div style="display:flex;align-items:center;gap:6px;margin-top:8px;">
@@ -1302,59 +1365,51 @@
                     </div>
                 </div>
 
-                <div style="margin-bottom:16px;">
-                    <label style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:12px;color:#4b5563;">
-                        <span>批量抓取范围</span>
-                        <span style="color:#9ca3af;font-size:11px;" title="继承当前 Pixiv URL 的官方筛选参数，并按完整筛选上下文隔离缓存">精确继承筛选</span>
-                    </label>
-                    <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
-                        <span style="font-size:12px;">从第</span>
-                        <input type="number" id="pixiv-page-start" min="1" step="5" style="width:52px;padding:5px;background:#fff;color:#111827;border:1px solid #d1d5db;border-radius:4px;font-size:12px;text-align:center;">
-                        <span style="font-size:12px;">页起，连续</span>
-                        <input type="number" id="pixiv-page-count" min="1" value="5" style="width:52px;padding:5px;background:#fff;color:#111827;border:1px solid #d1d5db;border-radius:4px;font-size:12px;text-align:center;">
-                        <span style="font-size:12px;">页</span>
+                <div style="margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid #e5e7eb;">
+                    <div style="font-size:11px;font-weight:700;color:#374151;margin-bottom:6px;">采集：Pixiv 只负责发现作品 ID</div>
+                    <input id="pixiv-discovery-keyword" type="text" placeholder="采集关键词" style="width:100%;padding:6px 8px;margin-bottom:6px;background:#fff;color:#111827;border:1px solid #d1d5db;border-radius:4px;font-size:12px;">
+                    <div style="display:flex;align-items:center;gap:6px;margin-bottom:7px;">
+                        <span style="font-size:11px;">从第</span><input type="number" id="pixiv-page-start" min="1" step="5" style="width:54px;padding:5px;background:#fff;border:1px solid #d1d5db;border-radius:4px;font-size:11px;text-align:center;">
+                        <span style="font-size:11px;">页，连续</span><input type="number" id="pixiv-page-count" min="1" value="5" style="width:54px;padding:5px;background:#fff;border:1px solid #d1d5db;border-radius:4px;font-size:11px;text-align:center;"><span style="font-size:11px;">页</span>
                     </div>
-                    <button id="btn-fetch-range" class="secondary-btn" style="width:100%;padding:7px 0;background:#f3f4f6;color:#374151;border:1px solid #e5e7eb;border-radius:4px;cursor:pointer;font-size:12px;font-weight:500;">开始后台抓取</button>
+                    <button id="btn-fetch-range" class="secondary-btn" style="width:100%;padding:7px 0;background:#f3f4f6;color:#374151;border:1px solid #e5e7eb;border-radius:4px;cursor:pointer;font-size:12px;font-weight:500;">开始宽泛采集</button>
+                    <div style="font-size:9px;color:#9ca3af;margin-top:4px;">不继承当前 URL 的任何筛选条件。</div>
                 </div>
 
-                <div style="margin-bottom:12px;">
-                    <label style="display:block;margin-bottom:6px;font-size:12px;color:#4b5563;">全局展现维度</label>
-                    <select id="pixiv-rank-sort-select" style="width:100%;padding:7px 8px;background:#fff;color:#111827;border:1px solid #d1d5db;border-radius:4px;font-size:12px;">
-                        <option value="bookmark">按收藏数最高</option>
-                        <option value="rate">按收藏比率最高</option>
-                        <option value="like">按点赞数最高</option>
-                        <option value="view">按浏览量最高</option>
-                    </select>
+                <div style="font-size:11px;font-weight:700;color:#374151;margin-bottom:6px;">本地筛选：完全使用 V3 数据库</div>
+                <div style="display:flex;gap:5px;margin-bottom:6px;">
+                    <input id="pixiv-local-tag-input" list="pixiv-tag-datalist" type="text" placeholder="中文翻译或原 Tag" style="flex:1;min-width:0;padding:6px 8px;background:#fff;color:#111827;border:1px solid #d1d5db;border-radius:4px;font-size:11px;">
+                    <datalist id="pixiv-tag-datalist"></datalist><button id="btn-add-local-tag" class="pixiv-mini-btn" type="button">添加</button>
                 </div>
-
-                <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
-                    <span style="font-size:12px;color:#4b5563;">滤除低收藏:</span>
-                    <input type="number" id="pixiv-min-fav" value="0" min="0" step="50" style="width:76px;padding:5px 8px;background:#fff;color:#111827;border:1px solid #d1d5db;border-radius:4px;font-size:12px;">
+                <div id="pixiv-active-tag-filters" style="display:flex;flex-wrap:wrap;gap:4px;min-height:20px;margin-bottom:7px;"></div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:7px;">
+                    <select id="pixiv-filter-ai" style="padding:6px;background:#fff;border:1px solid #d1d5db;border-radius:4px;font-size:11px;"><option value="all">AI：全部</option><option value="exclude">AI：排除</option><option value="only">AI：仅 AI</option></select>
+                    <select id="pixiv-filter-r18" style="padding:6px;background:#fff;border:1px solid #d1d5db;border-radius:4px;font-size:11px;"><option value="all">R18：全部</option><option value="exclude">R18：排除</option><option value="only">R18：仅 R18</option></select>
                 </div>
-
-                <button id="btn-apply-sort" class="primary-btn" style="width:100%;padding:9px 0;background:#0096fa;color:#fff;font-weight:600;border:0;border-radius:4px;cursor:pointer;font-size:13px;">跨页展现并排序全部记录</button>
-                <button id="btn-restore-native" class="secondary-btn" style="width:100%;padding:7px 0;margin-top:7px;background:#fff;color:#6b7280;border:1px solid #e5e7eb;border-radius:4px;cursor:pointer;font-size:12px;">恢复 Pixiv 原生结果</button>
-            </div>
-        `;
+                <div style="display:grid;grid-template-columns:1fr 105px;gap:6px;margin-bottom:8px;">
+                    <select id="pixiv-rank-sort-select" style="padding:7px 8px;background:#fff;color:#111827;border:1px solid #d1d5db;border-radius:4px;font-size:11px;"><option value="bookmark">收藏数最高</option><option value="rate">收藏率最高</option><option value="like">点赞数最高</option><option value="view">浏览量最高</option><option value="date">发布时间最新</option></select>
+                    <input type="number" id="pixiv-min-fav" value="0" min="0" step="50" title="最低收藏数" placeholder="最低收藏" style="padding:6px;background:#fff;color:#111827;border:1px solid #d1d5db;border-radius:4px;font-size:11px;">
+                </div>
+                <button id="btn-apply-sort" class="primary-btn" style="width:100%;padding:9px 0;background:#0096fa;color:#fff;font-weight:600;border:0;border-radius:4px;cursor:pointer;font-size:13px;">本地筛选并排序</button>
+                <div style="display:flex;gap:6px;margin-top:6px;">
+                    <button id="btn-clear-local-filters" class="secondary-btn" style="flex:1;padding:6px;background:#fff;color:#6b7280;border:1px solid #e5e7eb;border-radius:4px;cursor:pointer;font-size:11px;">清空筛选</button>
+                    <button id="btn-restore-native" class="secondary-btn" style="flex:1;padding:6px;background:#fff;color:#6b7280;border:1px solid #e5e7eb;border-radius:4px;cursor:pointer;font-size:11px;">恢复原生结果</button>
+                </div>
+            </div>`;
 
         document.body.appendChild(panel);
-
-        const tagEl = document.getElementById('pixiv-current-tag');
+        const discoveryKeyword = document.getElementById('pixiv-discovery-keyword');
         const inputStart = document.getElementById('pixiv-page-start');
         const inputCount = document.getElementById('pixiv-page-count');
         const btnFetchRange = document.getElementById('btn-fetch-range');
-        const btnApply = document.getElementById('btn-apply-sort');
-        const sortSelect = document.getElementById('pixiv-rank-sort-select');
-        const minFavInput = document.getElementById('pixiv-min-fav');
         const toggleBtn = document.getElementById('pixiv-rank-toggle-btn');
         const panelBody = document.getElementById('pixiv-rank-panel-body');
         const dragHeader = document.getElementById('pixiv-rank-drag-header');
+        const localTagInput = document.getElementById('pixiv-local-tag-input');
 
-        tagEl.textContent = getCurrentSearchTag();
-        tagEl.title = buildSearchContext().label;
+        discoveryKeyword.value = getCurrentDiscoveryKeyword();
         inputStart.value = String(getCurrentPageNumber());
         inputStart.step = inputCount.value;
-
         inputCount.addEventListener('change', () => {
             const step = parseInt(inputCount.value, 10);
             if (Number.isFinite(step) && step > 0) inputStart.step = String(step);
@@ -1365,16 +1420,28 @@
         document.getElementById('btn-fetch-preset-aggressive').onclick = () => applyFetchPreset('aggressive');
         document.getElementById('btn-fetch-preset-balanced').onclick = () => applyFetchPreset('balanced');
         document.getElementById('btn-fetch-preset-steady').onclick = () => applyFetchPreset('steady');
-        for (const id of ['pixiv-delay-base', 'pixiv-delay-min', 'pixiv-delay-max', 'pixiv-success-threshold', 'pixiv-speedup-step', 'pixiv-rate-multiplier']) {
-            const el = document.getElementById(id);
-            if (el) el.addEventListener('change', applyFetchSettingsFromUI);
-        }
+        for (const id of ['pixiv-delay-base','pixiv-delay-min','pixiv-delay-max','pixiv-success-threshold','pixiv-speedup-step','pixiv-rate-multiplier']) document.getElementById(id)?.addEventListener('change', applyFetchSettingsFromUI);
+
         document.getElementById('btn-queue-pause').onclick = () => queue.togglePause();
-        document.getElementById('btn-queue-stop').onclick = () => {
-            scanAbortRequested = true;
-            queue.stop();
-        };
+        document.getElementById('btn-queue-stop').onclick = () => { scanAbortRequested = true; queue.stop(); };
         document.getElementById('btn-restore-native').onclick = restoreNativeResults;
+        document.getElementById('btn-apply-sort').onclick = applyCurrentLocalView;
+        document.getElementById('btn-add-local-tag').onclick = addTagFromFilterInput;
+        localTagInput.addEventListener('keydown', event => {
+            if (event.key === 'Enter') { event.preventDefault(); addTagFromFilterInput(); }
+        });
+
+        document.getElementById('btn-clear-local-filters').onclick = () => {
+            localFilterState.tags = [];
+            localFilterState.ai = 'all';
+            localFilterState.r18 = 'all';
+            document.getElementById('pixiv-filter-ai').value = 'all';
+            document.getElementById('pixiv-filter-r18').value = 'all';
+            document.getElementById('pixiv-min-fav').value = '0';
+            localTagInput.value = '';
+            renderLocalFilterChips();
+            logMessage('本地筛选条件已清空。', 'info');
+        };
 
         toggleBtn.onclick = () => {
             const hidden = panelBody.style.display === 'none';
@@ -1383,74 +1450,58 @@
         };
 
         btnFetchRange.onclick = async () => {
+            const keyword = discoveryKeyword.value.trim();
             const startPage = parseInt(inputStart.value, 10);
             const count = parseInt(inputCount.value, 10);
-            if (!Number.isFinite(startPage) || !Number.isFinite(count) || startPage < 1 || count < 1) {
-                logMessage('无效的抓取范围配置。', 'error');
-                return;
-            }
+            if (!keyword) return logMessage('请输入采集关键词。', 'error');
+            if (!Number.isFinite(startPage) || !Number.isFinite(count) || startPage < 1 || count < 1) return logMessage('无效的抓取范围配置。', 'error');
 
-            const context = buildSearchContext();
             const endPage = startPage + count - 1;
             scanAbortRequested = false;
             scanActive = true;
             queue.prepareForNewWork();
-            scanTotal = count;
-            scanProcessed = 0;
-            scanDiscovered = 0;
+            scanTotal = count; scanProcessed = 0; scanDiscovered = 0;
             updateScanUI();
             btnFetchRange.disabled = true;
-            logMessage(`扫描第 ${startPage}–${endPage} 页 · ${context.label}`, 'info');
+            logMessage(`宽泛采集「${keyword}」第 ${startPage}–${endPage} 页，不继承 URL 筛选。`, 'info');
 
             const discoveredSet = new Set();
             try {
                 for (let page = startPage; page <= endPage; page += 1) {
                     await queue.waitIfPaused();
                     if (scanAbortRequested || queue.stopRequested) break;
-
-                    logMessage(`抓取搜索页: ${page}`);
-                    const result = await fetchSearchPage(context, page);
+                    logMessage(`发现作品 ID：搜索页 ${page}`);
+                    const result = await fetchSearchPage(keyword, page);
                     if (result.cancelled || scanAbortRequested || queue.stopRequested) break;
-
                     if (!result.ok) {
                         const detail = result.status ? `HTTP ${result.status}` : result.errorType;
-                        logMessage(`第 ${page} 页抓取失败：${detail}。本批扫描停止，未将其误判为空页。`, 'error');
+                        logMessage(`第 ${page} 页抓取失败：${detail}。停止本批扫描。`, 'error');
                         break;
                     }
-
                     scanProcessed += 1;
                     for (const id of result.ids) discoveredSet.add(id);
                     scanDiscovered = discoveredSet.size;
                     updateScanUI();
-
-                    if (result.ids.length === 0) {
+                    if (!result.ids.length) {
                         logMessage(`第 ${page} 页正常返回但无作品，停止向后扫描。`, 'warn');
                         break;
                     }
-                    queue.enqueue(result.ids, context);
+                    queue.enqueue(result.ids);
                 }
             } finally {
                 scanActive = false;
                 btnFetchRange.disabled = false;
                 if (!scanAbortRequested && !queue.stopRequested) {
                     inputStart.value = String(startPage + count);
-                    logMessage(`搜索页扫描结束，共发现 ${scanDiscovered} 个唯一作品。`, 'success');
+                    logMessage(`ID 发现结束：本批共发现 ${scanDiscovered} 个唯一作品。`, 'success');
                 }
                 if (!queue.running && queue.queue.length === 0 && queue.totalInCurrentJob === 0) {
                     setTimeout(() => {
-                        scanTotal = 0;
-                        scanProcessed = 0;
-                        scanDiscovered = 0;
-                        updateScanUI();
-                        queue.updateProgressUI();
+                        scanTotal = 0; scanProcessed = 0; scanDiscovered = 0;
+                        updateScanUI(); queue.updateProgressUI();
                     }, 1500);
                 }
             }
-        };
-
-        btnApply.onclick = () => {
-            const minFav = Math.max(0, parseInt(minFavInput.value || '0', 10) || 0);
-            renderRankedArtworks(sortSelect.value, minFav);
         };
 
         enablePanelDrag(panel, dragHeader);
@@ -1458,6 +1509,8 @@
         syncFetchSettingsUI();
         updateDelayDisplay(fetcher.baseDelay, fetcher.statusLabel('基础'));
         updateScanUI();
+        renderLocalFilterChips();
+        refreshTagDatalist();
         queue.updateProgressUI();
     }
 
