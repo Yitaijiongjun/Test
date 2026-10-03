@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv 智能跨页排行助手 (全能进阶版)
 // @namespace    https://github.com/
-// @version      3.0.0
+// @version      3.0.1
 // @description  作品中心本地数据库：宽泛采集作品 ID，保存完整元数据与 Pixiv 中文标签翻译，本地自由筛选、组合标签与跨页排序。
 // @author       Antigravity
 // @match        https://www.pixiv.net/*
@@ -929,11 +929,9 @@
 
         const header = createElement('div', 'pixiv-dashboard-header');
         const titleWrap = createElement('div');
-        const title = createElement('div', '', '本地作品数据库');
+        const title = createElement('div', '', '标签库');
         title.style.cssText = 'font-size:16px;font-weight:700;color:#111827;';
-        const subtitle = createElement('div', '', 'Tag 来自作品详情，中文优先显示 Pixiv 官方翻译');
-        subtitle.style.cssText = 'font-size:11px;color:#9ca3af;margin-top:2px;';
-        titleWrap.append(title, subtitle);
+        titleWrap.append(title);
         const close = createElement('button', '', '×');
         close.type = 'button';
         close.style.cssText = 'border:0;background:transparent;color:#9ca3af;font-size:22px;cursor:pointer;line-height:1;';
@@ -955,18 +953,18 @@
         };
 
         summary.append(
-            makeMetric('唯一作品', allData.length.toLocaleString()),
-            makeMetric('唯一 Tag', catalog.length.toLocaleString()),
-            makeMetric('AI 作品', aiCount.toLocaleString()),
+            makeMetric('作品', allData.length.toLocaleString()),
+            makeMetric('标签', catalog.length.toLocaleString()),
+            makeMetric('AI', aiCount.toLocaleString()),
             makeMetric('R-18', r18Count.toLocaleString()),
-            makeMetric('预估存储', formatBytes(totalBytes))
+            makeMetric('存储', formatBytes(totalBytes))
         );
 
         const clearAll = createElement('button', '', '清空数据库');
         clearAll.type = 'button';
         clearAll.style.cssText = 'margin-left:auto;padding:6px 10px;background:#fff;color:#ef4444;border:1px solid #ef4444;border-radius:4px;font-size:11px;cursor:pointer;font-weight:600;';
         clearAll.onclick = async () => {
-            if (!confirm('确定要清空 V3 本地作品数据库吗？')) return;
+            if (!confirm('确定要清空本地数据库吗？')) return;
             await db.clearAll();
             await updateDBStats();
             await refreshTagDatalist();
@@ -980,11 +978,9 @@
         searchRow.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:10px;';
         const search = document.createElement('input');
         search.type = 'search';
-        search.placeholder = '搜索中文翻译或 Pixiv 原 Tag';
+        search.placeholder = '搜索标签';
         search.style.cssText = 'flex:1;padding:7px 9px;border:1px solid #d1d5db;border-radius:5px;font-size:12px;outline:none;';
-        const hint = createElement('span', '', '最多展示 500 项');
-        hint.style.cssText = 'font-size:10px;color:#9ca3af;white-space:nowrap;';
-        searchRow.append(search, hint);
+        searchRow.append(search);
         body.appendChild(searchRow);
 
         const table = createElement('table', 'pixiv-dashboard-table');
@@ -1076,11 +1072,10 @@
         box.replaceChildren();
 
         if (!localFilterState.tags.length) {
-            const empty = createElement('span', '', '未选择 Tag：将查询整个本地数据库');
-            empty.style.cssText = 'font-size:10px;color:#9ca3af;';
-            box.appendChild(empty);
+            box.style.display = 'none';
             return;
         }
+        box.style.display = 'flex';
 
         for (const tag of localFilterState.tags) {
             const chip = createElement('button');
@@ -1323,22 +1318,22 @@
 
         panel.innerHTML = `
             <div id="pixiv-rank-drag-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;cursor:move;touch-action:none;">
-                <span style="font-weight:600;font-size:14px;color:#111827;">Pixiv 本地作品引擎 V3</span>
+                <span style="font-weight:600;font-size:14px;color:#111827;">Pixiv 本地排序</span>
                 <span id="pixiv-rank-toggle-btn" data-no-drag style="cursor:pointer;color:#9ca3af;font-size:12px;">▼ 收起</span>
             </div>
             <div id="pixiv-rank-panel-body">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:7px;font-size:11px;color:#6b7280;">
-                    <span>本地作品: <strong id="pixiv-db-count" style="color:#0096fa;">0</strong></span>
-                    <a id="btn-open-db" style="color:#0096fa;cursor:pointer;">Tag 数据库</a>
+                    <span>作品 <strong id="pixiv-db-count" style="color:#0096fa;">0</strong></span>
+                    <a id="btn-open-db" style="color:#0096fa;cursor:pointer;">标签库</a>
                 </div>
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:7px;font-size:11px;color:#6b7280;">
-                    <span>当前 Fetch 延迟: <strong id="pixiv-fetch-delay" style="color:#111827;">-</strong></span>
+                    <span>Fetch <strong id="pixiv-fetch-delay" style="color:#111827;">-</strong></span>
                     <span id="pixiv-fetch-delay-state" class="pixiv-status-pill">基础</span>
                 </div>
 
                 <details id="pixiv-fetch-tuning" style="margin-bottom:10px;border:1px solid #e5e7eb;border-radius:6px;background:#fafafa;">
                     <summary style="cursor:pointer;padding:7px 8px;font-size:11px;color:#4b5563;display:flex;justify-content:space-between;align-items:center;">
-                        <span>Fetch 节流调节</span><span id="pixiv-fetch-profile-summary" style="color:#0096fa;">-</span>
+                        <span>Fetch</span><span id="pixiv-fetch-profile-summary" style="color:#0096fa;">-</span>
                     </summary>
                     <div style="padding:0 8px 8px;">
                         <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 8px;margin-bottom:7px;">
@@ -1358,7 +1353,10 @@
                     </div>
                 </details>
 
-                <div id="pixiv-rank-log-box" style="height:96px;overflow-y:auto;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;margin-bottom:12px;"></div>
+                <details style="margin-bottom:10px;">
+                    <summary style="cursor:pointer;font-size:11px;color:#6b7280;padding:2px 0;">日志</summary>
+                    <div id="pixiv-rank-log-box" style="height:96px;overflow-y:auto;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:8px;margin-top:5px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;"></div>
+                </details>
                 <div id="pixiv-progress-container" style="display:none;margin-bottom:12px;padding:9px;border:1px solid #e5e7eb;border-radius:6px;background:#fafafa;">
                     <div id="pixiv-scan-progress" style="font-size:11px;color:#6b7280;margin-bottom:5px;">搜索页扫描: -</div>
                     <div style="display:flex;justify-content:space-between;font-size:11px;color:#6b7280;margin-bottom:4px;">
@@ -1373,22 +1371,21 @@
                 </div>
 
                 <div style="margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid #e5e7eb;">
-                    <div style="font-size:11px;font-weight:700;color:#374151;margin-bottom:6px;">采集：Pixiv 只负责发现作品 ID</div>
+                    <div style="font-size:11px;font-weight:700;color:#374151;margin-bottom:6px;">采集</div>
                     <input id="pixiv-discovery-keyword" type="text" placeholder="采集关键词" style="width:100%;padding:6px 8px;margin-bottom:6px;background:#fff;color:#111827;border:1px solid #d1d5db;border-radius:4px;font-size:12px;">
                     <div style="display:flex;align-items:center;gap:6px;margin-bottom:7px;">
                         <span style="font-size:11px;">从第</span><input type="number" id="pixiv-page-start" min="1" step="5" style="width:54px;padding:5px;background:#fff;border:1px solid #d1d5db;border-radius:4px;font-size:11px;text-align:center;">
                         <span style="font-size:11px;">页，连续</span><input type="number" id="pixiv-page-count" min="1" value="5" style="width:54px;padding:5px;background:#fff;border:1px solid #d1d5db;border-radius:4px;font-size:11px;text-align:center;"><span style="font-size:11px;">页</span>
                     </div>
-                    <button id="btn-fetch-range" class="secondary-btn" style="width:100%;padding:7px 0;background:#f3f4f6;color:#374151;border:1px solid #e5e7eb;border-radius:4px;cursor:pointer;font-size:12px;font-weight:500;">开始宽泛采集</button>
-                    <div style="font-size:9px;color:#9ca3af;margin-top:4px;">不继承当前 URL 的任何筛选条件。</div>
+                    <button id="btn-fetch-range" class="secondary-btn" style="width:100%;padding:7px 0;background:#f3f4f6;color:#374151;border:1px solid #e5e7eb;border-radius:4px;cursor:pointer;font-size:12px;font-weight:500;">开始采集</button>
                 </div>
 
-                <div style="font-size:11px;font-weight:700;color:#374151;margin-bottom:6px;">本地筛选：完全使用 V3 数据库</div>
+                <div style="font-size:11px;font-weight:700;color:#374151;margin-bottom:6px;">筛选</div>
                 <div style="display:flex;gap:5px;margin-bottom:6px;">
-                    <input id="pixiv-local-tag-input" list="pixiv-tag-datalist" type="text" placeholder="中文翻译或原 Tag" style="flex:1;min-width:0;padding:6px 8px;background:#fff;color:#111827;border:1px solid #d1d5db;border-radius:4px;font-size:11px;">
+                    <input id="pixiv-local-tag-input" list="pixiv-tag-datalist" type="text" placeholder="Tag" style="flex:1;min-width:0;padding:6px 8px;background:#fff;color:#111827;border:1px solid #d1d5db;border-radius:4px;font-size:11px;">
                     <datalist id="pixiv-tag-datalist"></datalist><button id="btn-add-local-tag" class="pixiv-mini-btn" type="button">添加</button>
                 </div>
-                <div id="pixiv-active-tag-filters" style="display:flex;flex-wrap:wrap;gap:4px;min-height:20px;margin-bottom:7px;"></div>
+                <div id="pixiv-active-tag-filters" style="display:none;flex-wrap:wrap;gap:4px;margin-bottom:7px;"></div>
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:7px;">
                     <select id="pixiv-filter-ai" style="padding:6px;background:#fff;border:1px solid #d1d5db;border-radius:4px;font-size:11px;"><option value="all">AI：全部</option><option value="exclude">AI：排除</option><option value="only">AI：仅 AI</option></select>
                     <select id="pixiv-filter-r18" style="padding:6px;background:#fff;border:1px solid #d1d5db;border-radius:4px;font-size:11px;"><option value="all">R18：全部</option><option value="exclude">R18：排除</option><option value="only">R18：仅 R18</option></select>
@@ -1397,7 +1394,7 @@
                     <select id="pixiv-rank-sort-select" style="padding:7px 8px;background:#fff;color:#111827;border:1px solid #d1d5db;border-radius:4px;font-size:11px;"><option value="bookmark">收藏数最高</option><option value="rate">收藏率最高</option><option value="like">点赞数最高</option><option value="view">浏览量最高</option><option value="date">发布时间最新</option></select>
                     <input type="number" id="pixiv-min-fav" value="0" min="0" step="50" title="最低收藏数" placeholder="最低收藏" style="padding:6px;background:#fff;color:#111827;border:1px solid #d1d5db;border-radius:4px;font-size:11px;">
                 </div>
-                <button id="btn-apply-sort" class="primary-btn" style="width:100%;padding:9px 0;background:#0096fa;color:#fff;font-weight:600;border:0;border-radius:4px;cursor:pointer;font-size:13px;">本地筛选并排序</button>
+                <button id="btn-apply-sort" class="primary-btn" style="width:100%;padding:9px 0;background:#0096fa;color:#fff;font-weight:600;border:0;border-radius:4px;cursor:pointer;font-size:13px;">应用</button>
                 <div style="display:flex;gap:6px;margin-top:6px;">
                     <button id="btn-clear-local-filters" class="secondary-btn" style="flex:1;padding:6px;background:#fff;color:#6b7280;border:1px solid #e5e7eb;border-radius:4px;cursor:pointer;font-size:11px;">清空筛选</button>
                     <button id="btn-restore-native" class="secondary-btn" style="flex:1;padding:6px;background:#fff;color:#6b7280;border:1px solid #e5e7eb;border-radius:4px;cursor:pointer;font-size:11px;">恢复原生结果</button>
