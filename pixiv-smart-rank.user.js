@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Pixiv 智能跨页排行助手 (全能进阶版)
 // @namespace    https://github.com/
-// @version      2.0.0
-// @description  精确区间抓取、筛选上下文隔离、IndexedDB 缓存、跨页排序、任务控制、自适应请求延迟与数据库大屏。
+// @version      2.1.0
+// @description  精确区间抓取、筛选上下文隔离、IndexedDB 缓存、跨页排序、可调自适应节流、任务控制与数据库大屏。
 // @author       Antigravity
 // @match        https://www.pixiv.net/*
 // @grant        none
@@ -20,10 +20,22 @@
     const ART_STORE = 'artworks';
     const MEMBERSHIP_STORE = 'searchMemberships';
     const CACHE_TTL = 7 * 86400 * 1000;
-    const DELAY_STORAGE_KEY = 'PixivSmartRank_Delay';
+    const DELAY_STORAGE_KEY = 'PixivSmartRank_Delay'; // 兼容 v2.0 旧值
+    const FETCH_SETTINGS_STORAGE_KEY = 'PixivSmartRank_FetchSettings';
     const PANEL_POS_STORAGE_KEY = 'PixivSmartRank_PanelPos';
-    const MIN_FETCH_DELAY = 250;
-    const MAX_FETCH_DELAY = 6000;
+    const HARD_MIN_FETCH_DELAY = 30;
+    const HARD_MAX_FETCH_DELAY = 10000;
+    const DEFAULT_FETCH_SETTINGS = Object.freeze({
+        baseDelay: 160,
+        minDelay: 60,
+        maxDelay: 2500,
+        successThreshold: 4,
+        speedupStep: 20,
+        rateLimitMultiplier: 1.25,
+        forbiddenMultiplier: 1.12,
+        backoffStart: 700,
+        backoffMax: 20000
+    });
 
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -412,28 +424,108 @@
     // ==========================================
     class AdaptiveFetcher {
         constructor() {
-            const saved = parseInt(localStorage.getItem(DELAY_STORAGE_KEY) || '350', 10);
-            this.baseDelay = clamp(Number.isFinite(saved) ? saved : 350, MIN_FETCH_DELAY, MAX_FETCH_DELAY);
-            this.backoff = 1000;
+            this.settings = this.loadSettings();
+            this.baseDelay = this.settings.baseDelay;
+            this.backoff = this.settings.backoffStart;
             this.successStreak = 0;
             this.tail = Promise.resolve();
             this.activeControllers = new Set();
         }
 
-        saveDelay() {
+        normalizeSettings(input = {}) {
+            const numberOr = (value, fallback) => {
+                const n = Number(value);
+                return Number.isFinite(n) ? n : fallback;
+            };
+
+            const minDelay = clamp(Math.round(numberOr(input.minDelay, DEFAULT_FETCH_SETTINGS.minDelay)), HARD_MIN_FETCH_DELAY, HARD_MAX_FETCH_DELAY);
+            const maxDelay = clamp(Math.round(numberOr(input.maxDelay, DEFAULT_FETCH_SETTINGS.maxDelay)), minDelay, HARD_MAX_FETCH_DELAY);
+            const baseDelay = clamp(Math.round(numberOr(input.baseDelay, DEFAULT_FETCH_SETTINGS.baseDelay)), minDelay, maxDelay);
+
+            return {
+                baseDelay,
+                minDelay,
+                maxDelay,
+                successThreshold: clamp(Math.round(numberOr(input.successThreshold, DEFAULT_FETCH_SETTINGS.successThreshold)), 1, 50),
+                speedupStep: clamp(Math.round(numberOr(input.speedupStep, DEFAULT_FETCH_SETTINGS.speedupStep)), 1, 1000),
+                rateLimitMultiplier: clamp(numberOr(input.rateLimitMultiplier, DEFAULT_FETCH_SETTINGS.rateLimitMultiplier), 1.05, 4),
+                forbiddenMultiplier: clamp(numberOr(input.forbiddenMultiplier, DEFAULT_FETCH_SETTINGS.forbiddenMultiplier), 1.02, 3),
+                backoffStart: clamp(Math.round(numberOr(input.backoffStart, DEFAULT_FETCH_SETTINGS.backoffStart)), 200, 10000),
+                backoffMax: clamp(Math.round(numberOr(input.backoffMax, DEFAULT_FETCH_SETTINGS.backoffMax)), 2000, 60000)
+            };
+        }
+
+        loadSettings() {
+            let saved = {};
+            try {
+                saved = JSON.parse(localStorage.getItem(FETCH_SETTINGS_STORAGE_KEY) || '{}') || {};
+            } catch (_) {
+                saved = {};
+            }
+
+            // v2.0 只保存单一 delay；首次升级时继承它，但不再受旧的 250ms 下限约束。
+            const legacy = parseInt(localStorage.getItem(DELAY_STORAGE_KEY) || '', 10);
+            if (!Number.isFinite(Number(saved.baseDelay)) && Number.isFinite(legacy)) saved.baseDelay = legacy;
+            return this.normalizeSettings({ ...DEFAULT_FETCH_SETTINGS, ...saved });
+        }
+
+        saveSettings() {
+            this.settings.baseDelay = this.baseDelay;
+            localStorage.setItem(FETCH_SETTINGS_STORAGE_KEY, JSON.stringify(this.settings));
             localStorage.setItem(DELAY_STORAGE_KEY, String(this.baseDelay));
         }
 
-        setBaseDelay(value) {
-            this.baseDelay = clamp(Math.round(value), MIN_FETCH_DELAY, MAX_FETCH_DELAY);
-            this.saveDelay();
-            updateDelayDisplay(this.baseDelay, '基础');
+        getSettings() {
+            return { ...this.settings, baseDelay: this.baseDelay };
+        }
+
+        applySettings(next = {}, reason = '手动设置') {
+            const normalized = this.normalizeSettings({ ...this.settings, ...next });
+            this.settings = normalized;
+            this.baseDelay = normalized.baseDelay;
+            this.backoff = Math.min(this.backoff, normalized.backoffMax);
+            this.successStreak = 0;
+            this.saveSettings();
+            updateDelayDisplay(this.baseDelay, reason);
+            syncFetchSettingsUI();
+        }
+
+        setBaseDelay(value, reason = '自适应') {
+            this.baseDelay = clamp(Math.round(value), this.settings.minDelay, this.settings.maxDelay);
+            this.settings.baseDelay = this.baseDelay;
+            this.saveSettings();
+            updateDelayDisplay(this.baseDelay, reason);
+            syncFetchSettingsUI();
+        }
+
+        noteSuccess() {
+            this.backoff = this.settings.backoffStart;
+            this.successStreak += 1;
+
+            if (this.successStreak >= this.settings.successThreshold) {
+                if (this.baseDelay > this.settings.minDelay) {
+                    const before = this.baseDelay;
+                    this.baseDelay = Math.max(this.settings.minDelay, this.baseDelay - this.settings.speedupStep);
+                    this.settings.baseDelay = this.baseDelay;
+                    this.saveSettings();
+                    updateDelayDisplay(this.baseDelay, '自动加速 ' + before + '→' + this.baseDelay + 'ms');
+                }
+                this.successStreak = 0;
+            }
+        }
+
+        noteFailure() {
+            this.successStreak = 0;
+        }
+
+        statusLabel(defaultReason = '基础') {
+            return defaultReason + ' · 成功 ' + this.successStreak + '/' + this.settings.successThreshold;
         }
 
         async wait(ms, reason) {
             updateDelayDisplay(ms, reason);
             await sleep(ms);
-            updateDelayDisplay(this.baseDelay, '基础');
+            updateDelayDisplay(this.baseDelay, this.statusLabel('基础'));
         }
 
         abortAll() {
@@ -470,42 +562,38 @@
 
                     if (response.ok) {
                         const json = await response.json();
-                        this.backoff = 1000;
-                        this.successStreak += 1;
-                        if (this.successStreak >= 25 && this.baseDelay > MIN_FETCH_DELAY) {
-                            this.setBaseDelay(this.baseDelay - 10);
-                            this.successStreak = 0;
-                        }
-                        await this.wait(this.baseDelay, '节流');
+                        this.noteSuccess();
+                        await this.wait(this.baseDelay, '节流 · 成功 ' + this.successStreak + '/' + this.settings.successThreshold);
                         return { ok: true, status: response.status, json };
                     }
 
-                    this.successStreak = 0;
+                    this.noteFailure();
                     attempt += 1;
 
                     if (response.status === 429) {
                         if (attempt > maxRetries) return { ok: false, status: 429, errorType: 'rate-limit' };
                         const delay = this.backoff;
-                        logMessage(`${label}: HTTP 429 限流，第 ${attempt}/${maxRetries} 次退避 ${delay}ms`, 'error');
-                        this.setBaseDelay(Math.min(MAX_FETCH_DELAY, Math.ceil(this.baseDelay * 1.5)));
+                        logMessage(label + ': HTTP 429 限流，第 ' + attempt + '/' + maxRetries + ' 次退避 ' + delay + 'ms', 'error');
+                        this.setBaseDelay(Math.ceil(this.baseDelay * this.settings.rateLimitMultiplier), '429 降速');
                         await this.wait(delay, '429 退避');
-                        this.backoff = Math.min(60000, this.backoff * 2);
+                        this.backoff = Math.min(this.settings.backoffMax, Math.ceil(this.backoff * 1.8));
                         continue;
                     }
 
                     if (response.status === 403) {
-                        if (attempt > Math.min(maxRetries, 3)) return { ok: false, status: 403, errorType: 'forbidden' };
-                        const delay = Math.max(2000, this.backoff);
-                        logMessage(`${label}: HTTP 403（权限/风控），第 ${attempt}/${Math.min(maxRetries, 3)} 次重试`, 'error');
-                        this.setBaseDelay(Math.min(MAX_FETCH_DELAY, Math.ceil(this.baseDelay * 1.35)));
+                        const retryLimit = Math.min(maxRetries, 2);
+                        if (attempt > retryLimit) return { ok: false, status: 403, errorType: 'forbidden' };
+                        const delay = Math.max(1200, this.backoff);
+                        logMessage(label + ': HTTP 403（权限/风控），第 ' + attempt + '/' + retryLimit + ' 次重试', 'error');
+                        this.setBaseDelay(Math.ceil(this.baseDelay * this.settings.forbiddenMultiplier), '403 降速');
                         await this.wait(delay, '403 退避');
-                        this.backoff = Math.min(30000, this.backoff * 2);
+                        this.backoff = Math.min(this.settings.backoffMax, Math.ceil(this.backoff * 1.6));
                         continue;
                     }
 
                     if (response.status >= 500 && response.status <= 599 && attempt <= maxRetries) {
-                        const delay = Math.min(10000, 1200 * attempt);
-                        logMessage(`${label}: HTTP ${response.status}，${delay}ms 后重试`, 'warn');
+                        const delay = Math.min(6000, 700 * attempt);
+                        logMessage(label + ': HTTP ' + response.status + '，' + delay + 'ms 后重试', 'warn');
                         await this.wait(delay, '服务器重试');
                         continue;
                     }
@@ -516,10 +604,11 @@
                     if (error && error.name === 'AbortError') {
                         return { ok: false, cancelled: true, status: 0, errorType: 'cancelled' };
                     }
+                    this.noteFailure();
                     attempt += 1;
                     if (attempt > maxRetries) return { ok: false, status: 0, errorType: 'network', error };
-                    const delay = Math.min(10000, 1500 * attempt);
-                    logMessage(`${label}: 网络异常，第 ${attempt}/${maxRetries} 次重试`, 'error');
+                    const delay = Math.min(6000, 800 * attempt);
+                    logMessage(label + ': 网络异常，第 ' + attempt + '/' + maxRetries + ' 次重试', 'error');
                     await this.wait(delay, '网络重试');
                 }
             }
@@ -529,6 +618,53 @@
     }
 
     const fetcher = new AdaptiveFetcher();
+
+    function syncFetchSettingsUI() {
+        const settings = fetcher.getSettings();
+        const values = {
+            'pixiv-delay-base': settings.baseDelay,
+            'pixiv-delay-min': settings.minDelay,
+            'pixiv-delay-max': settings.maxDelay,
+            'pixiv-success-threshold': settings.successThreshold,
+            'pixiv-speedup-step': settings.speedupStep,
+            'pixiv-rate-multiplier': settings.rateLimitMultiplier
+        };
+        for (const [id, value] of Object.entries(values)) {
+            const el = document.getElementById(id);
+            if (el && document.activeElement !== el) el.value = String(value);
+        }
+        const summary = document.getElementById('pixiv-fetch-profile-summary');
+        if (summary) summary.textContent = settings.baseDelay + 'ms / 下限 ' + settings.minDelay + 'ms';
+    }
+
+    function applyFetchSettingsFromUI() {
+        const read = (id, fallback) => {
+            const el = document.getElementById(id);
+            const n = el ? Number(el.value) : NaN;
+            return Number.isFinite(n) ? n : fallback;
+        };
+        const current = fetcher.getSettings();
+        fetcher.applySettings({
+            baseDelay: read('pixiv-delay-base', current.baseDelay),
+            minDelay: read('pixiv-delay-min', current.minDelay),
+            maxDelay: read('pixiv-delay-max', current.maxDelay),
+            successThreshold: read('pixiv-success-threshold', current.successThreshold),
+            speedupStep: read('pixiv-speedup-step', current.speedupStep),
+            rateLimitMultiplier: read('pixiv-rate-multiplier', current.rateLimitMultiplier)
+        });
+        logMessage('Fetch 节流参数已更新：' + fetcher.baseDelay + 'ms，最低 ' + fetcher.settings.minDelay + 'ms，' + fetcher.settings.successThreshold + ' 次成功加速 ' + fetcher.settings.speedupStep + 'ms。', 'success');
+    }
+
+    function applyFetchPreset(name) {
+        const presets = {
+            aggressive: { baseDelay: 120, minDelay: 40, maxDelay: 1500, successThreshold: 3, speedupStep: 25, rateLimitMultiplier: 1.20 },
+            balanced: { baseDelay: 160, minDelay: 60, maxDelay: 2500, successThreshold: 4, speedupStep: 20, rateLimitMultiplier: 1.25 },
+            steady: { baseDelay: 250, minDelay: 120, maxDelay: 4000, successThreshold: 8, speedupStep: 15, rateLimitMultiplier: 1.35 }
+        };
+        if (!presets[name]) return;
+        fetcher.applySettings(presets[name], name === 'aggressive' ? '激进预设' : name === 'balanced' ? '均衡预设' : '稳健预设');
+        logMessage('已切换 Fetch 节流预设：' + (name === 'aggressive' ? '激进' : name === 'balanced' ? '均衡' : '稳健') + '。', 'info');
+    }
 
     // ==========================================
     // 5. 详情队列与任务控制
@@ -1154,10 +1290,34 @@
                     <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">标签: <strong id="pixiv-current-tag" style="color:#111827;"></strong></span>
                     <span style="white-space:nowrap;">总库: <strong id="pixiv-db-count" style="color:#0096fa;">0</strong> <a id="btn-open-db" style="color:#0096fa;cursor:pointer;margin-left:3px;">DB</a></span>
                 </div>
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:11px;color:#6b7280;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:7px;font-size:11px;color:#6b7280;">
                     <span>当前 Fetch 延迟: <strong id="pixiv-fetch-delay" style="color:#111827;">-</strong></span>
                     <span id="pixiv-fetch-delay-state" class="pixiv-status-pill">基础</span>
                 </div>
+
+                <details id="pixiv-fetch-tuning" style="margin-bottom:10px;border:1px solid #e5e7eb;border-radius:6px;background:#fafafa;">
+                    <summary style="cursor:pointer;padding:7px 8px;font-size:11px;color:#4b5563;display:flex;justify-content:space-between;align-items:center;">
+                        <span>Fetch 节流调节</span>
+                        <span id="pixiv-fetch-profile-summary" style="color:#0096fa;">-</span>
+                    </summary>
+                    <div style="padding:0 8px 8px;">
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 8px;margin-bottom:7px;">
+                            <label style="font-size:10px;color:#6b7280;">当前延迟(ms)<input id="pixiv-delay-base" type="number" min="30" max="10000" step="10" style="width:100%;box-sizing:border-box;margin-top:2px;padding:4px 5px;border:1px solid #d1d5db;border-radius:4px;background:#fff;"></label>
+                            <label style="font-size:10px;color:#6b7280;">最低延迟(ms)<input id="pixiv-delay-min" type="number" min="30" max="10000" step="10" style="width:100%;box-sizing:border-box;margin-top:2px;padding:4px 5px;border:1px solid #d1d5db;border-radius:4px;background:#fff;"></label>
+                            <label style="font-size:10px;color:#6b7280;">最高延迟(ms)<input id="pixiv-delay-max" type="number" min="30" max="10000" step="50" style="width:100%;box-sizing:border-box;margin-top:2px;padding:4px 5px;border:1px solid #d1d5db;border-radius:4px;background:#fff;"></label>
+                            <label style="font-size:10px;color:#6b7280;">成功 N 次加速<input id="pixiv-success-threshold" type="number" min="1" max="50" step="1" style="width:100%;box-sizing:border-box;margin-top:2px;padding:4px 5px;border:1px solid #d1d5db;border-radius:4px;background:#fff;"></label>
+                            <label style="font-size:10px;color:#6b7280;">每次加速(ms)<input id="pixiv-speedup-step" type="number" min="1" max="1000" step="5" style="width:100%;box-sizing:border-box;margin-top:2px;padding:4px 5px;border:1px solid #d1d5db;border-radius:4px;background:#fff;"></label>
+                            <label style="font-size:10px;color:#6b7280;">429 延迟倍率<input id="pixiv-rate-multiplier" type="number" min="1.05" max="4" step="0.05" style="width:100%;box-sizing:border-box;margin-top:2px;padding:4px 5px;border:1px solid #d1d5db;border-radius:4px;background:#fff;"></label>
+                        </div>
+                        <div style="display:flex;gap:5px;">
+                            <button id="btn-fetch-preset-aggressive" class="pixiv-mini-btn" type="button" style="flex:1;">激进</button>
+                            <button id="btn-fetch-preset-balanced" class="pixiv-mini-btn" type="button" style="flex:1;">均衡</button>
+                            <button id="btn-fetch-preset-steady" class="pixiv-mini-btn" type="button" style="flex:1;">稳健</button>
+                            <button id="btn-fetch-settings-apply" class="pixiv-mini-btn" type="button" style="flex:1;font-weight:600;">应用</button>
+                        </div>
+                    </div>
+                </details>
+
                 <div id="pixiv-rank-log-box" style="height:108px;overflow-y:auto;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;margin-bottom:12px;"></div>
 
                 <div id="pixiv-progress-container" style="display:none;margin-bottom:14px;padding:9px;border:1px solid #e5e7eb;border-radius:6px;background:#fafafa;">
@@ -1233,6 +1393,14 @@
         });
 
         document.getElementById('btn-open-db').onclick = renderDBDashboard;
+        document.getElementById('btn-fetch-settings-apply').onclick = applyFetchSettingsFromUI;
+        document.getElementById('btn-fetch-preset-aggressive').onclick = () => applyFetchPreset('aggressive');
+        document.getElementById('btn-fetch-preset-balanced').onclick = () => applyFetchPreset('balanced');
+        document.getElementById('btn-fetch-preset-steady').onclick = () => applyFetchPreset('steady');
+        for (const id of ['pixiv-delay-base', 'pixiv-delay-min', 'pixiv-delay-max', 'pixiv-success-threshold', 'pixiv-speedup-step', 'pixiv-rate-multiplier']) {
+            const el = document.getElementById(id);
+            if (el) el.addEventListener('change', applyFetchSettingsFromUI);
+        }
         document.getElementById('btn-queue-pause').onclick = () => queue.togglePause();
         document.getElementById('btn-queue-stop').onclick = () => {
             scanAbortRequested = true;
@@ -1319,7 +1487,8 @@
 
         enablePanelDrag(panel, dragHeader);
         updateDBStats();
-        updateDelayDisplay(fetcher.baseDelay, '基础');
+        syncFetchSettingsUI();
+        updateDelayDisplay(fetcher.baseDelay, fetcher.statusLabel('基础'));
         updateScanUI();
         queue.updateProgressUI();
     }
