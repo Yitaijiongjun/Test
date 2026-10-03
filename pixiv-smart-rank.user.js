@@ -1145,7 +1145,6 @@
         image.src = art.thumbUrl || '';
         image.alt = art.title || '';
         image.loading = 'lazy';
-        image.referrerPolicy = 'no-referrer';
         image.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;';
         imageBox.appendChild(image);
 
@@ -1183,8 +1182,16 @@
         tags.style.cssText = 'display:flex;gap:4px;overflow:hidden;height:18px;';
         for (const tag of (Array.isArray(art.tags) ? art.tags : []).slice(0, 3)) {
             const pill = createElement('span', '', displayTagName(tag));
-            pill.title = tag.translatedName && tag.translatedName !== tag.name ? `${tag.translatedName} / ${tag.name}` : tag.name;
-            pill.style.cssText = 'max-width:95px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#f3f4f6;color:#6b7280;border-radius:3px;padding:1px 4px;font-size:9px;';
+            pill.title = tag.translatedName && tag.translatedName !== tag.name
+                ? `${tag.translatedName} / ${tag.name} · 点击筛选`
+                : `${tag.name} · 点击筛选`;
+            pill.style.cssText = 'max-width:95px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#f3f4f6;color:#6b7280;border-radius:3px;padding:1px 4px;font-size:9px;cursor:pointer;';
+            pill.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                addLocalTagFilter(tag.name, tag.translatedName);
+                applyCurrentLocalView();
+            });
             tags.appendChild(pill);
         }
 
