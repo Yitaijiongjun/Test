@@ -1,6 +1,6 @@
 # Pixiv 本地排序
 
-Tampermonkey 用户脚本。当前版本：**3.0.2**。
+Tampermonkey 用户脚本。当前版本：**3.0.3**。
 
 ## V3
 
